@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Planning Application Documents Mock Portal</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    .tabs { list-style: none; padding: 0; display: flex; border-bottom: 2px solid #ccc; }
+    .tabs li { padding: 10px 20px; border: 1px solid #ccc; border-bottom: none; margin-right: 5px; cursor: pointer; background: #f0f0f0; }
+    .tabs li.active { background: #fff; border-top: 3px solid #0056b3; font-weight: bold; }
+    .aTable { width: 100%; border-collapse: collapse; margin-top: 20px; }
+    .aTable th, .aTable td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+    .aTable th { background-color: #f2f2f2; font-weight: bold; }
+    .footer { margin-top: 50px; border-top: 1px solid #ccc; padding-top: 10px; font-size: 12px; }
+  </style>
+</head>
+<body>
+
+  <h1>Application Details - 25/01142/HH</h1>
+  
+  <!-- Navigation Tabs -->
+  <ul class="tabs">
+    <li><a href="/online-applications/applicationDetails.do?activeTab=summary&keyVal=SWXDIXJYJIV00">Summary</a></li>
+    <li><a href="/online-applications/applicationDetails.do?activeTab=details&keyVal=SWXDIXJYJIV00">Further Information</a></li>
+    <li><a href="/online-applications/applicationDetails.do?activeTab=contacts&keyVal=SWXDIXJYJIV00">Contacts</a></li>
+    <li class="active" id="subtab_documents">
+      <a href="/online-applications/applicationDetails.do?activeTab=documents&keyVal=SWXDIXJYJIV00">Documents (4)</a>
+    </li>
+    <li><a href="/online-applications/applicationDetails.do?activeTab=map&keyVal=SWXDIXJYJIV00">Map</a></li>
+  </ul>
+
+  <!-- Main Documents Area -->
+  <div id="documentsContent">
+    <p>Below is a list of documents associated with this planning application.</p>
+    
+    <table class="aTable" id="documents" summary="Documents associated with planning application">
+      <thead>
+        <tr>
+          <th>Date Published</th>
+          <th>Document Type</th>
+          <th>Description</th>
+          <th>View</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>12 Jun 2025</td>
+          <td>Plans - Proposed</td>
+          <td>Proposed Ground & First Floor Plans</td>
+          <td><a href="/online-applications/files/12345/Proposed_Ground_First_Floor.pdf">View</a></td>
+        </tr>
+        <tr>
+          <td>13 Jun 2025</td>
+          <td>Supporting Documents</td>
+          <td>Design and Access Statement</td>
+          <td><a href="showDocument.do?documentId=998877">View</a></td>
+        </tr>
+        <tr>
+          <td>14 Jun 2025</td>
+          <td>Decision Notice</td>
+          <td>Approved Householder Decision Notice</td>
+          <td><a href="documentDetails.do?id=ABCDEF">Download</a></td>
+        </tr>
+        <tr>
+          <td>15 Jun 2025</td>
+          <td>Plans - Existing</td>
+          <td>Existing Elevations</td>
+          <td><a href="/online-applications/files/12345/Existing_Elevations.pdf">View</a></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Unrelated Navigation Links (to test that our scraper ignores them) -->
+  <div class="footer">
+    <p>System links that must be filtered out by the scraper:</p>
+    <ul>
+      <li><a href="/online-applications/search.do?action=simple">Simple Search</a></li>
+      <li><a href="/online-applications/login.do">Login to Comment</a></li>
+      <li><a href="help">Help Page</a></li>
+      <li><a href="javascript:void(0);">Print Page</a></li>
+    </ul>
+  </div>
+
+</body>
+</html>

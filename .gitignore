@@ -1,0 +1,41 @@
+# ── Secrets / environment ──────────────────────────────────────────────
+# Never commit env files — they contain Supabase service-role keys.
+.env
+.env.*
+!.env.example
+dashboard/.env.local
+dashboard/.env*.local
+
+# ── Dependencies ───────────────────────────────────────────────────────
+node_modules/
+dashboard/node_modules/
+
+# ── Generated output (Supabase is the datastore; these are local artifacts) ──
+output/
+debug/
+logs/
+*.log
+
+# ── Browser automation sessions / Playwright ───────────────────────────
+.sessions/
+playwright-report/
+test-results/
+
+# ── Build / Next.js (dashboard has its own .gitignore too) ─────────────
+dashboard/.next/
+dist/
+build/
+
+# ── OS / editor cruft ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# ── Misc ───────────────────────────────────────────────────────────────
+*.pid
+*.tmp
+.cache/
+coverage/

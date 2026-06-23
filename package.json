@@ -1,0 +1,48 @@
+{
+  "name": "planning-scraper",
+  "version": "1.0.0",
+  "description": "Planit UK → Council Portal → Document Scraper (MVP)",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "debug": "cross-env PWDEBUG=1 node src/index.js",
+    "test": "node test/run_tests.js",
+    "test-intel": "node test/intelligence_tests.js",
+    "test-platform": "node test/platform_tests.js",
+    "test-phase9": "node test/phase9_repository_tests.js && node test/phase9_queue_tests.js && node test/phase9_browser_tests.js && node test/phase9_cloudflare_tests.js",
+    "validate": "node test/live_validation.js",
+    "validate-live": "node test/live_validation.js",
+    "intelligence": "node src/intelligence/index.js",
+    "platform": "node src/platform/index.js",
+    "worker:scrape": "node src/workers/scrapeWorker.js",
+    "worker:download": "node src/workers/downloadWorker.js",
+    "worker:intelligence": "node src/workers/intelligenceWorker.js",
+    "worker:retry": "node src/workers/retryWorker.js",
+    "storage:backfill": "node src/scripts/backfillDocumentStorage.js",
+    "data:reset": "node src/scripts/resetData.js",
+    "extract-locations": "node src/jobs/extractLocations.js",
+    "download-location-documents": "node src/jobs/downloadLocationDocuments.js"
+  },
+  "keywords": [
+    "planning",
+    "scraper",
+    "playwright",
+    "uk"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.106.2",
+    "bullmq": "^5.77.6",
+    "dotenv": "^16.0.0",
+    "ioredis": "^5.11.0",
+    "minisearch": "^7.2.0",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.44.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  },
+  "devDependencies": {
+    "cross-env": "^7.0.3"
+  }
+}
