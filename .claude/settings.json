@@ -8,7 +8,9 @@
       "Bash(timeout 180 node src/intelligence/index.js)",
       "Bash(node -e \"console.log\\(require\\('pdf-parse/package.json'\\).version\\)\")",
       "Bash(node --check src/intelligence/ocr.js)",
-      "Bash(timeout 240 node src/intelligence/index.js)"
+      "Bash(timeout 240 node src/intelligence/index.js)",
+      "Bash(echo \"=== exit: $? ===\")",
+      "Bash(git check-ignore *)"
     ]
   }
 }
