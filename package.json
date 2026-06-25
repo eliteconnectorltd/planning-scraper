@@ -21,7 +21,8 @@
     "storage:backfill": "node src/scripts/backfillDocumentStorage.js",
     "data:reset": "node src/scripts/resetData.js",
     "extract-locations": "node src/jobs/extractLocations.js",
-    "download-location-documents": "node src/jobs/downloadLocationDocuments.js"
+    "download-location-documents": "node src/jobs/downloadLocationDocuments.js",
+    "build-coverage": "node src/jobs/buildCoverageTracker.js"
   },
   "keywords": [
     "planning",

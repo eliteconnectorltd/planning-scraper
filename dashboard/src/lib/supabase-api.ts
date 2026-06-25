@@ -219,10 +219,15 @@ export async function getApplicationsPage(options: {
       query = query.or(`application_uid.ilike.${q},address.ilike.${q},proposal.ilike.${q}`);
     }
     const { data, count, error } = await query;
-    if (!error && data && data.length > 0) {
-      const mapped: ApplicationRecord[] = await Promise.all(data.map(mapSupabaseApplication));
+    // If Supabase is configured and the query succeeded, TRUST it — even when it
+    // returns zero rows. A genuinely empty result must surface as "0 results",
+    // not silently fall through to the (possibly stale) JSON mirror. We only fall
+    // back to JSON when the client is absent or the query errored.
+    if (!error) {
+      const mapped: ApplicationRecord[] = await Promise.all((data || []).map(mapSupabaseApplication));
       return { data: mapped, count: count || 0, page, pageSize, source: "supabase" };
     }
+    console.error("[supabase-api] applications query failed, falling back to JSON:", error.message);
   }
 
   let records = getMasterDataset();
@@ -248,9 +253,13 @@ export async function getApplicationDetail(id: string): Promise<ApplicationRecor
       .eq("application_uid", decodedId)
       .maybeSingle();
 
-    if (!error && data) {
-      return mapSupabaseApplication(data);
+    // Configured + reachable: trust Supabase. A missing record returns null
+    // (→ 404) rather than falling through to the stale JSON mirror. Only a real
+    // query error degrades to JSON.
+    if (!error) {
+      return data ? mapSupabaseApplication(data) : null;
     }
+    console.error("[supabase-api] application detail query failed, falling back to JSON:", error.message);
   }
 
   return getMasterDataset().find(r => r.application_id === decodedId || r.title === decodedId) || null;
@@ -262,8 +271,10 @@ export async function getChangeFeed(options: { page?: string | number; pageSize?
 
   if (client) {
     const { data, count, error } = await client.from("change_log").select("*", { count: "exact" }).order("detected_at", { ascending: false }).range(from, to);
-    if (!error && data) {
-      const entries = data.map(row => ({
+    // Trust Supabase when configured + reachable (even when empty); only degrade
+    // to the JSON change log on a real query error.
+    if (!error) {
+      const entries = (data || []).map(row => ({
         run_id: row.id,
         run_at: row.detected_at,
         triggered_by: "supabase",

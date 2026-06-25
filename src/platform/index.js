@@ -156,6 +156,13 @@ function __injectTestRecords(records) {
  *  3. Load the engine from fresh data
  *  4. Print summary
  *
+ * NOTE (architecture): this is the LEGACY disk/JSON pipeline. For the Idox path,
+ * Supabase is the real datastore — `npm start` persists applications, documents,
+ * and Storage files directly to Supabase and never calls this. This builder reads
+ * output/results.json (+ optional output/downloads & output/intelligence) and is
+ * retained only for offline/JSON-mode use and the workers/jobs folder. It is NOT
+ * part of the Supabase-first flow and is intentionally not run from `npm start`.
+ *
  * @returns {object} { stats, diff, changeLogEntry }
  */
 async function runPlatform() {

@@ -178,7 +178,32 @@ async function scrapeSalesforceDocuments(page, url) {
   metrics.success = documents.length > 0;
 
   console.log(`[salesforce] ${host} record ${recordId}: ${documents.length} document(s) in ${metrics.runtimeMs}ms`);
-  return { documents, metrics };
+
+  // The shepherd download endpoint (/pr/sfc/servlet.shepherd/version/download/{Id})
+  // is served to the SAME (guest) session that the aura call ran under. The aura
+  // POST above went through page.context().request, so the context now holds the
+  // guest session cookies — capture them so downloadManager can carry them to the
+  // download. Also pass Origin/Referer (the page the request appears to come from).
+  //
+  // HONEST NOTE: Salesforce community downloads are session-bound. The cookies
+  // path is the load-bearing one here (a session cookie, not a header). If guest
+  // downloads still fail, this likely needs an authenticated session cookie or a
+  // CSRF token captured from a real browser visit — flag for manual testing.
+  let cookies = [];
+  try {
+    cookies = await page.context().cookies();
+  } catch (err) {
+    console.log(`[salesforce] Could not read context cookies for downloadAuth: ${err.message}`);
+  }
+  const downloadAuth = {
+    headers: {
+      Origin: origin,
+      Referer: `${origin}/pr/s/planning-application/${recordId}`,
+    },
+    cookies,
+  };
+
+  return { documents, metrics, downloadAuth };
 }
 
 module.exports = {

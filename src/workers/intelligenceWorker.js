@@ -7,10 +7,15 @@ const { createManagedWorker } = require('./workerUtils');
 
 async function processIntelligenceJob(job) {
   await job.updateProgress(10);
-  const manifest = await processDocumentIntelligence(job.data || {});
+  // processDocumentIntelligence() returns a FLAT summary object (no `.summary`
+  // wrapper): { totalDocumentsProcessed, successfullyExtractedText,
+  // scannedPdfsCount, failedCount, classificationBreakdown }. Align to it.
+  const summary = await processDocumentIntelligence();
   return {
-    totalDocumentsProcessed: manifest.summary.totalDocumentsProcessed,
-    failedOcrCount: manifest.summary.failedOcrCount,
+    totalDocumentsProcessed: summary.totalDocumentsProcessed,
+    successfullyExtractedText: summary.successfullyExtractedText,
+    scannedPdfsCount: summary.scannedPdfsCount,
+    failedCount: summary.failedCount,
   };
 }
 

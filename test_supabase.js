@@ -142,6 +142,15 @@ async function run() {
     ok(`Uploaded file to Storage  (bucket: ${TEST_BUCKET}, path: ${TEST_FILE_PATH})`);
     passed++;
     storageOk = true;
+
+    // Signed URL — this is exactly how the dashboard serves stored documents
+    // (dashboard/src/lib/supabase-api.ts → createDocumentUrl()).
+    const { data: signed, error: signErr } = await client.storage
+      .from(TEST_BUCKET)
+      .createSignedUrl(TEST_FILE_PATH, 60 * 60);
+    if (signErr) throw signErr;
+    ok(`Signed URL (valid 1h):\n     ${signed.signedUrl}`);
+    passed++;
   } catch (err) {
     fail('Storage upload failed', err);
     failed++;

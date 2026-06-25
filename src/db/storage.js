@@ -16,6 +16,15 @@ function normalizeStoragePart(value, fallback = 'unknown') {
     .replace(/^_+|_+$/g, '') || fallback;
 }
 
+// Strips parameters from a MIME type so it matches the bucket's allowedMimeTypes
+// gate ("application/pdf; charset=utf-8" → "application/pdf"). Duplicated from
+// downloadManager.js intentionally to avoid a circular require (downloadManager
+// already requires this module).
+function normalizeMimeType(mime) {
+  if (!mime || typeof mime !== 'string') return 'application/octet-stream';
+  return mime.split(';')[0].trim().toLowerCase();
+}
+
 async function ensureDocumentsBucket(client, bucket = DEFAULT_BUCKET) {
   if (bucketReady) return;
 
@@ -63,9 +72,16 @@ async function uploadDocumentFile(options = {}) {
   const hashPart = normalizeStoragePart((options.sha256 || 'unhashed').slice(0, 16), 'unhashed');
   const objectPath = `${council}/${application}/${hashPart}/${baseName}${extension}`;
 
+  // The bucket's allowedMimeTypes gate matches the BARE type only — strip any
+  // parameters (e.g. "application/pdf; charset=utf-8" → "application/pdf") before
+  // sending to the upload API, or Storage rejects it. We still keep the original
+  // (with parameters) in storageMimeType / storage_mime_type for accuracy.
+  const rawMimeType = options.mimeType || 'application/pdf';
+  const uploadContentType = normalizeMimeType(rawMimeType);
+
   const { error } = await client.storage.from(bucket).upload(objectPath, buffer, {
     cacheControl: '3600',
-    contentType: options.mimeType || 'application/pdf',
+    contentType: uploadContentType,
     upsert: true,
   });
 
@@ -74,7 +90,7 @@ async function uploadDocumentFile(options = {}) {
   return {
     storageBucket: bucket,
     storagePath: objectPath,
-    storageMimeType: options.mimeType || 'application/pdf',
+    storageMimeType: rawMimeType,
     storageUploadedAt: new Date().toISOString(),
   };
 }

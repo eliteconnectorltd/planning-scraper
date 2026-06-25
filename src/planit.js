@@ -214,8 +214,124 @@ async function fetchApplicationList(days = 4, limit = 5, areaName = '') {
   return json.records;
 }
 
+// ── Planit detail metadata extraction ────────────────────────────────────────
+
+/** Trim a value to a non-empty string, else null. */
+function cleanStr(value) {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  return s === '' ? null : s;
+}
+
+/** Parse a number cautiously; null on missing/empty/NaN. */
+function numOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isNaN(n) ? null : n;
+}
+
 /**
- * Fetches the full detail JSON for a single application to extract source URLs.
+ * Sentinel filter for agent_name / applicant_name / case_officer.
+ * Planit returns the literal string "See source" (any case) when it does NOT
+ * actually hold the value — it's a "click through to the council portal"
+ * placeholder, not real data. Treat it as null so we don't persist a sentinel.
+ */
+function filterSentinel(value) {
+  const s = cleanStr(value);
+  if (s === null) return null;
+  return s.toLowerCase() === 'see source' ? null : s;
+}
+
+/**
+ * URL filter for comment_url / map_url. Planit returns placeholder strings like
+ * "See comment" / "See map" when it has no real URL — accept ONLY genuine http(s)
+ * URLs, reject everything else (including those placeholders) to null.
+ */
+function urlOrNull(v) {
+  const s = cleanStr(v);
+  if (!s) return null;
+  if (s.startsWith('http://') || s.startsWith('https://')) return s;
+  return null;
+}
+
+/**
+ * Builds the structured planitMetadata object from a detail JSON payload.
+ * All fields are optional (null when absent/empty/NaN/sentinel). Dates are kept
+ * RAW as strings — not reformatted (schema keeps date columns as text on purpose).
+ *
+ * @param {object} detail - Parsed Planit detail JSON
+ * @returns {{ metadata: object, total: number, populated: number, redacted: number }}
+ */
+function buildPlanitMetadata(detail) {
+  const of = (detail && detail.other_fields) || {}; // may be missing entirely
+
+  // Raw cleaned sentinel candidates (pre-filter) so we can report redaction count.
+  const rawAgent = cleanStr(of.agent_name);
+  const rawApplicant = cleanStr(of.applicant_name);
+  const rawCaseOfficer = cleanStr(of.case_officer);
+
+  const agent_name = filterSentinel(of.agent_name);
+  const applicant_name = filterSentinel(of.applicant_name);
+  const case_officer = filterSentinel(of.case_officer);
+
+  const metadata = {
+    // From top-level
+    description: cleanStr(detail.description),
+    address: cleanStr(detail.address),
+    postcode: cleanStr(detail.postcode),
+    start_date: cleanStr(detail.start_date),
+    app_size: cleanStr(detail.app_size),
+    app_state: cleanStr(detail.app_state),
+    app_type: cleanStr(detail.app_type),
+    consulted_date: cleanStr(detail.consulted_date),
+    decided_date: cleanStr(detail.decided_date),
+    location_x: numOrNull(detail.location_x), // longitude
+    location_y: numOrNull(detail.location_y), // latitude
+
+    // From other_fields (safe access — any key may be absent)
+    application_type: cleanStr(of.application_type),
+    status: cleanStr(of.status),
+    decided_by: cleanStr(of.decided_by),
+    date_received: cleanStr(of.date_received),
+    date_validated: cleanStr(of.date_validated),
+    target_decision_date: cleanStr(of.target_decision_date),
+    ward_name: cleanStr(of.ward_name),
+    uprn: cleanStr(of.uprn),
+    planning_portal_id: cleanStr(of.planning_portal_id),
+    n_statutory_days: numOrNull(of.n_statutory_days),
+    n_documents: numOrNull(of.n_documents), // Planit's own doc count, not a live count
+    n_constraints: numOrNull(of.n_constraints),
+    n_comments: numOrNull(of.n_comments),
+    easting: numOrNull(of.easting),
+    northing: numOrNull(of.northing),
+    lat: numOrNull(of.lat),
+    lng: numOrNull(of.lng),
+    agent_company: cleanStr(of.agent_company),
+    agent_address: cleanStr(of.agent_address),
+    consultation_start_date: cleanStr(of.consultation_start_date), // raw, not reformatted
+    comment_url: urlOrNull(of.comment_url),
+    map_url: urlOrNull(of.map_url),
+
+    // Sentinel-filtered (see filterSentinel)
+    agent_name,
+    applicant_name,
+    case_officer,
+  };
+
+  let redacted = 0;
+  if (rawAgent && agent_name === null) redacted++;
+  if (rawApplicant && applicant_name === null) redacted++;
+  if (rawCaseOfficer && case_officer === null) redacted++;
+
+  const total = Object.keys(metadata).length;
+  const populated = Object.values(metadata).filter(v => v !== null && v !== undefined).length;
+
+  return { metadata, total, populated, redacted };
+}
+
+/**
+ * Fetches the full detail JSON for a single application to extract source URLs
+ * and the broader planning metadata Planit exposes.
  */
 async function fetchApplicationDetail(planitPageUrl) {
   const detailUrl = planitPageUrl.endsWith('/')
@@ -226,12 +342,16 @@ async function fetchApplicationDetail(planitPageUrl) {
 
   try {
     const detail = await fetchJsonWithRetry(detailUrl);
+    const { metadata, total, populated, redacted } = buildPlanitMetadata(detail);
+    // Counts only — never log values (case_officer etc. may be sensitive).
+    console.log(`[planit] Metadata: ${populated}/${total} fields populated (${redacted} redacted)`);
     return {
       sourceUrl: detail.url || null,
       docsUrl: detail.other_fields?.docs_url || null,
       nDocuments: detail.other_fields?.n_documents ?? null,
       scraperName: detail.scraper_name || detail.area_name || null,
       otherFields: detail.other_fields || {},
+      planitMetadata: metadata,
     };
   } catch (err) {
     console.log(`[planit] Detail API completely failed for ${planitPageUrl}: ${err.message}`);
@@ -241,6 +361,7 @@ async function fetchApplicationDetail(planitPageUrl) {
       nDocuments: null,
       scraperName: null,
       otherFields: {},
+      planitMetadata: null,
     };
   }
 }
@@ -289,6 +410,9 @@ async function getApplications(pageOrDays, locationOrLimit, optionalAreaName) {
       sourceUrl: detail.sourceUrl,
       docsUrl: detail.docsUrl,
       nDocuments: detail.nDocuments,
+      // Broader Planit detail metadata (platform-agnostic, available to all
+      // consumers). null if the detail fetch failed for this application.
+      planitMetadata: detail.planitMetadata || null,
     });
 
     // Small delay between successful acquisitions to avoid triggering rate limits

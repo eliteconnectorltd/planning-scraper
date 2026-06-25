@@ -20,6 +20,7 @@ const { scrapeArcusDocuments } = require('./adapters/arcus');
 const { scrapeSalesforceDocuments } = require('./adapters/salesforce');
 const { downloadDocument } = require('./download/downloadManager');
 const { RunManager } = require('./core/runManager');
+const { loadFilter, shouldProcess } = require('./core/postcodeFilter');
 const applicationsRepository = require('./db/repositories/applicationsRepository');
 const documentsRepository = require('./db/repositories/documentsRepository');
 const runsRepository = require('./db/repositories/runsRepository');
@@ -30,10 +31,74 @@ const { recordPlatformMetric } = require('./platforms/fingerprint');
 const BROWSER_PLATFORMS = ['idox', 'arcus', 'salesforce'];
 
 // ── CONFIG & ENV ──────────────────────────────────────────────────────────────
-const LOCATION = process.env.LOCATION || 'London';
+// LOCATION maps to Planit's `auth` filter, which expects a COUNCIL/authority key
+// (e.g. "Croydon", "Camden"), NOT a region like "London". An empty LOCATION means
+// no `auth` filter at all → the national recent-applications feed. See
+// src/planit.js fetchApplicationList(): `auth` is only appended when areaName is set.
+const LOCATION = process.env.LOCATION || '';
 const OUTPUT_FILE = path.join(__dirname, '..', 'output', 'results.json');
 const DAYS_TO_FETCH = Number(process.env.DAYS_TO_FETCH) || 4;
 const MAX_APPLICATIONS = Number(process.env.MAX_APPLICATIONS) || 5;
+
+/**
+ * Folds Planit detail metadata (app.planitMetadata) into the fields the
+ * applications repository maps to columns. Returns a shallow copy of `app` with
+ * the mapped fields ADDED only when planitMetadata holds a non-null value — it
+ * never overwrites an existing value with null. Platform-agnostic: runs before
+ * any adapter is chosen, so every platform benefits.
+ *
+ * Available in planitMetadata but STILL NOT stored (no column on `applications`):
+ *   location_x, location_y, app_size, app_state, app_type, consulted_date,
+ *   start_date, case_officer.
+ * Left unmapped intentionally — decide later whether to add columns for them.
+ */
+function applyPlanitMetadata(app) {
+  const m = app && app.planitMetadata;
+  if (!m) return app;
+  const out = { ...app };
+  const setIf = (key, value) => { if (value !== null && value !== undefined) out[key] = value; };
+
+  setIf('application_type', m.application_type);
+  setIf('status', m.status);
+  setIf('received_at', m.date_received);
+  setIf('validated_at', m.date_validated);
+  setIf('decision_date', m.decided_date);
+  // `decided_by` (WHO decided: "Delegated", "Committee") now has its OWN column —
+  // we no longer overload `decision` with it. `decision` is left for the actual
+  // approval OUTCOME (Approved/Refused/Pending), to be populated by later work.
+  setIf('decided_by', m.decided_by);
+  // proposal: only fill from Planit description if nothing came from the listing.
+  if ((out.proposal == null || out.proposal === '') && (out.description == null || out.description === '')) {
+    setIf('proposal', m.description);
+  }
+  // applicant/agent: usually null due to the "See source" sentinel filter — that's
+  // correct; the council portal scrape can populate them later.
+  setIf('applicant', m.applicant_name);
+  setIf('agent', m.agent_name);
+
+  // Extended Planit metadata → their own columns (migration 004). Counts (0) are
+  // preserved because setIf only skips null/undefined, not 0.
+  setIf('postcode', m.postcode);
+  setIf('ward_name', m.ward_name);
+  setIf('uprn', m.uprn);
+  setIf('planning_portal_id', m.planning_portal_id);
+  setIf('lat', m.lat);
+  setIf('lng', m.lng);
+  setIf('easting', m.easting);
+  setIf('northing', m.northing);
+  setIf('n_statutory_days', m.n_statutory_days);
+  setIf('n_documents', m.n_documents);
+  setIf('n_constraints', m.n_constraints);
+  setIf('n_comments', m.n_comments);
+  setIf('agent_company', m.agent_company);
+  setIf('agent_address', m.agent_address);
+  setIf('target_decision_date', m.target_decision_date);
+  setIf('consultation_start_date', m.consultation_start_date);
+  setIf('comment_url', m.comment_url);
+  setIf('map_url', m.map_url);
+
+  return out;
+}
 
 async function main() {
   const runManager = new RunManager();
@@ -53,7 +118,8 @@ async function main() {
     // 1. Fetch from Planit API
     runManager.log('Fetching application feed from Planit JSON API...');
     const incomingApps = await getApplications(DAYS_TO_FETCH, MAX_APPLICATIONS, LOCATION);
-    await applicationsRepository.upsertApplications(incomingApps).catch(err => {
+    // Initial fetch: persist with the Planit detail metadata folded into columns.
+    await applicationsRepository.upsertApplications(incomingApps.map(applyPlanitMetadata)).catch(err => {
       runManager.log(`Supabase application batch persistence failed: ${err.message}`, 'WARNING');
     });
     runManager.log(`Enriched applications returned from Planit: ${incomingApps.length}`);
@@ -68,6 +134,11 @@ async function main() {
       return;
     }
 
+    // 1b. Load the service-provider postcode-area coverage filter (once).
+    //     Applications are only processed if their postcode area is covered by
+    //     at least one registered provider in sp_contact_profiles. Fail-closed.
+    const postcodeFilter = await loadFilter();
+
     // 2. Filter queue with Resume Support
     const queue = runManager.getResumeQueue(incomingApps);
 
@@ -76,8 +147,26 @@ async function main() {
 
     // 3. Process Applications
     for (const app of queue) {
+      // ── Postcode-area coverage gate (applies to ALL adapters) ──────────────
+      // Runs before resume-check / detectPlatform / status upsert so an
+      // uncovered application never gets scraped or downloaded by any path.
+      const decision = shouldProcess(app, postcodeFilter);
+      if (!decision.allowed) {
+        runManager.recordFilterSkip(app, decision.reason);
+        runManager.log(`[filter] SKIP ${app.title}  (${decision.reason})`, 'WARNING');
+        await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), scrape_status: 'skipped_filter' }).catch(err => {
+          runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
+        });
+        // Auditable record in results.json — distinct platform + the reason.
+        results.push({ ...app, platform: 'filtered', filter_reason: decision.reason, documents: [] });
+        continue;
+      }
+      if (decision.matchedArea) {
+        runManager.log(`[filter] PASS ${app.title}  (area: ${decision.matchedArea})`);
+      }
+
       runManager.log(`Processing application: ${app.title} (Council: ${app.area || 'Unknown'})`);
-      await applicationsRepository.upsertApplication({ ...app, scrape_status: app.skipped_resume ? 'skipped_resume' : 'queued' }).catch(err => {
+      await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), scrape_status: app.skipped_resume ? 'skipped_resume' : 'queued' }).catch(err => {
         runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
       });
 
@@ -117,7 +206,7 @@ async function main() {
           documents: []
         });
         runManager.recordApplication(app, 'unknown', false, new Error('No valid portal URL available'), 0);
-        await applicationsRepository.upsertApplication({ ...app, platform: 'unknown', scrape_status: 'missing_url' }).catch(() => {});
+        await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), platform: 'unknown', scrape_status: 'missing_url' }).catch(() => {});
         continue;
       }
 
@@ -192,9 +281,12 @@ async function main() {
       }
 
       const documents = docsObject.documents || [];
+      // Adapter-declared per-request auth (headers/cookies) for downloads. Idox
+      // omits it; Arcus/Salesforce populate it. Never log its contents (secrets).
+      const downloadAuth = docsObject.downloadAuth || undefined;
       runManager.recordApplication(app, platform, success, error, documents.length);
       await applicationsRepository.upsertApplication({
-        ...app,
+        ...applyPlanitMetadata(app),
         platform,
         scrape_status: success ? 'scraped' : (error && error.code === 'BLOCKED' ? 'blocked' : 'failed'),
       }).catch(err => {
@@ -214,10 +306,11 @@ async function main() {
       // 4. Download extracted files in real-time
       const processedDocs = [];
       if (success && documents.length > 0) {
-        runManager.log(`Initiating stream downloads for ${documents.length} extracted files...`);
+        runManager.log(`Initiating stream downloads for ${documents.length} extracted files... (downloadAuth: ${downloadAuth ? 'present' : 'absent'})`);
         for (const doc of documents) {
-          // Pass the context to downloadDocument to preserve session cookies
-          const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, BROWSER_PLATFORMS.includes(platform) ? context : null);
+          // Pass the context to downloadDocument to preserve session cookies, plus
+          // any adapter-declared downloadAuth (headers/cookies) for this portal.
+          const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, BROWSER_PLATFORMS.includes(platform) ? context : null, downloadAuth);
           runManager.recordDownload(downloadRecord.status, downloadRecord.sizeBytes);
           const appRow = await applicationsRepository.findByUid(app.title).catch(() => null);
           await documentsRepository.upsertDocument({ ...doc, ...downloadRecord }, appRow && appRow.id).catch(err => {
@@ -295,7 +388,9 @@ async function main() {
       totalApplications: finalSummary.summary.totalProcessed,
       totalDocuments: finalSummary.summary.documentsExtracted,
       successfulDownloads: finalSummary.summary.downloadsCompleted,
-      failedDownloads: Object.values(finalSummary.errorClassification || {}).reduce((sum, count) => sum + count, 0),
+      // Real per-document download failure count (no longer derived from
+      // application-level error categories, which conflated different failures).
+      failedDownloads: finalSummary.summary.downloadsFailed,
       blockedRequests: finalSummary.errorClassification && finalSummary.errorClassification.BLOCKED || 0,
       runtimeSeconds: finalSummary.runtimeMs / 1000,
       run_status: 'completed',

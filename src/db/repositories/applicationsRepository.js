@@ -19,6 +19,27 @@ function mapApplication(app = {}) {
     received_at: app.received_at || app.startDate || null,
     decision: app.decision || null,
     decision_date: app.decision_date || app.decisionDate || null,
+    // Extended Planit metadata columns (migration 004). Numeric columns use ??
+    // so a legitimate 0 (e.g. n_comments) is preserved, not coerced to null.
+    decided_by: app.decided_by || null,
+    postcode: app.postcode || null,
+    ward_name: app.ward_name || null,
+    uprn: app.uprn || null,
+    planning_portal_id: app.planning_portal_id || null,
+    lat: app.lat ?? null,
+    lng: app.lng ?? null,
+    easting: app.easting ?? null,
+    northing: app.northing ?? null,
+    n_statutory_days: app.n_statutory_days ?? null,
+    n_documents: app.n_documents ?? app.nDocuments ?? null,
+    n_constraints: app.n_constraints ?? null,
+    n_comments: app.n_comments ?? null,
+    agent_company: app.agent_company || null,
+    agent_address: app.agent_address || null,
+    target_decision_date: app.target_decision_date || null,
+    consultation_start_date: app.consultation_start_date || null,
+    comment_url: app.comment_url || null,
+    map_url: app.map_url || null,
     scrape_status: app.scrape_status || app.scrapeStatus || null,
   };
 }
@@ -99,8 +120,11 @@ async function listApplications(options = {}) {
     query = query.or(`application_uid.ilike.${q},address.ilike.${q},proposal.ilike.${q}`);
   }
 
-  const response = await executeWithRetry(async () => query);
-  return { data: response || [], count: 0, page, pageSize };
+  // Read data AND the exact count from the same response (matches the pattern in
+  // listDocuments/listChanges). The previous code discarded count and hardcoded 0.
+  const { data, count, error } = await query;
+  if (error) throw error;
+  return { data: data || [], count: count || 0, page, pageSize };
 }
 
 module.exports = {

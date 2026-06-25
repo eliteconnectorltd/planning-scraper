@@ -42,12 +42,19 @@ class RunManager {
       councilsProcessed: new Set(),
       documentsExtracted: 0,
       downloadsCompleted: 0,
+      downloadsNoStorage: 0,
+      downloadsFailed: 0,
       duplicatesSkipped: 0,
       errors: {} // Count of each classified error
     };
 
     // Fingerprints of councils
     this.councils = {}; // councilName -> { platform, successCount, failCount, docsCount }
+
+    // Postcode-area coverage filter accounting. Kept OUTSIDE this.metrics so a
+    // filter-skipped application is never conflated with processed/failed counts.
+    this.applicationsSkippedByFilter = 0;
+    this.filterSkipReasons = {}; // reason -> count
 
     this.initializeLogging();
   }
@@ -174,9 +181,23 @@ class RunManager {
   recordDownload(status, sizeBytes = 0) {
     if (status === 'downloaded') {
       this.metrics.downloadsCompleted++;
+    } else if (status === 'downloaded_no_storage') {
+      // Bytes fetched + saved to local fallback, but not in Supabase Storage.
+      this.metrics.downloadsNoStorage++;
     } else if (status === 'skipped_duplicate') {
       this.metrics.duplicatesSkipped++;
+    } else if (status === 'failed') {
+      this.metrics.downloadsFailed++;
     }
+  }
+
+  /**
+   * Records an application skipped by the postcode-area coverage filter.
+   * These are tracked separately and never counted as processed/failed.
+   */
+  recordFilterSkip(app, reason) {
+    this.applicationsSkippedByFilter++;
+    this.filterSkipReasons[reason] = (this.filterSkipReasons[reason] || 0) + 1;
   }
 
   /**
@@ -198,8 +219,12 @@ class RunManager {
       const finishedMap = new Map();
 
       for (const app of existing) {
-        // App is successful if it was platform-processed, docs are populated or count was checked
-        const hasDocs = app.documentsCount > 0 || (app.documents && app.documents.length > 0) || app.documentsCount === 0;
+        // Only treat an application as "finished" if it was platform-processed
+        // AND actually yielded at least one document. A previous run that scraped
+        // zero documents (transient block, slow portal, selector miss) must NOT be
+        // permanently skipped — it should be re-attempted on the next run.
+        const docCount = (app.documents && app.documents.length) || app.documentsCount || 0;
+        const hasDocs = docCount > 0;
         if (app.platform && app.platform !== 'unknown' && hasDocs) {
           finishedMap.set(app.title, app);
         }
@@ -272,9 +297,13 @@ class RunManager {
         councilsCount: this.metrics.councilsProcessed.size,
         documentsExtracted: this.metrics.documentsExtracted,
         downloadsCompleted: this.metrics.downloadsCompleted,
-        duplicatesSkipped: this.metrics.duplicatesSkipped
+        downloadsNoStorage: this.metrics.downloadsNoStorage,
+        downloadsFailed: this.metrics.downloadsFailed,
+        duplicatesSkipped: this.metrics.duplicatesSkipped,
+        applicationsSkippedByFilter: this.applicationsSkippedByFilter
       },
       errorClassification: this.metrics.errors,
+      filterSkipReasons: this.filterSkipReasons,
       councilFingerprints: councilSummary,
       analytics
     };
@@ -282,6 +311,7 @@ class RunManager {
     try {
       fs.writeFileSync(SUMMARY_PATH, JSON.stringify(finalSummary, null, 2), 'utf8');
       this.log(`=== Scraper Execution Finished in ${finalSummary.runtimeFormatted} ===`);
+      this.log(`Filter: ${this.applicationsSkippedByFilter} application(s) skipped by postcode coverage filter ${JSON.stringify(this.filterSkipReasons)}`);
       this.log(`Run summary saved to ${SUMMARY_PATH}`);
     } catch (err) {
       this.log(`Failed writing summary JSON: ${err.message}`, 'ERROR');

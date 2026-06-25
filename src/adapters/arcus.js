@@ -116,7 +116,14 @@ async function scrapeArcusDocuments(page, url) {
   metrics.success = documents.length > 0;
 
   console.log(`[arcus] ${ctx.council} app ${ctx.id}: ${documents.length} document(s) in ${metrics.runtimeMs}ms`);
-  return { documents, metrics };
+  // The Arcus document download endpoint requires the same per-council API
+  // headers as the listing call. Declare them so downloadManager can apply them
+  // (without these, file fetches return HTTP 401). Headers only — no cookies.
+  return {
+    documents,
+    metrics,
+    downloadAuth: { headers: arcusHeaders(ctx.council) },
+  };
 }
 
 module.exports = {
