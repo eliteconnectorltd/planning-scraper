@@ -12,6 +12,7 @@ function mapApplication(app = {}) {
     status: app.status || null,
     applicant: app.applicant || null,
     agent: app.agent || null,
+    case_officer: app.case_officer || null, // migration 005
     application_type: app.application_type || app.applicationType || null,
     source_url: app.source_url || app.sourceUrl || null,
     documents_url: app.documents_url || app.docsUrl || null,

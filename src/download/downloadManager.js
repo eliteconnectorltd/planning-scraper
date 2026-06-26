@@ -302,8 +302,10 @@ async function downloadDocumentWithPlaywright(page, docUrl, depth = 0, downloadA
  * Takes an optional `downloadAuth` ({ headers?, cookies? }) declared by the
  * adapter for portals whose downloads need authentication (e.g. Arcus/Salesforce).
  * When omitted/null, behaves exactly as before (public downloads, e.g. Idox).
+ * Optional `extractionMethod` ('idox'|'arcus'|'salesforce'|'generic') is recorded
+ * on the document row (migration 006) for operational visibility.
  */
-async function downloadDocument(doc, application, council, manifest, context = null, downloadAuth = null) {
+async function downloadDocument(doc, application, council, manifest, context = null, downloadAuth = null, extractionMethod = null) {
   const resultRecord = {
     council,
     application: application.title,
@@ -320,6 +322,7 @@ async function downloadDocument(doc, application, council, manifest, context = n
     storagePath: '',
     storageMimeType: '',
     storageUploadedAt: '',
+    extraction_method: extractionMethod || null,
     error: null
   };
 

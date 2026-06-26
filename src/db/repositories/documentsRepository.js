@@ -56,6 +56,8 @@ function mapDocument(doc = {}, applicationId = null) {
     storage_path: doc.storage_path || doc.storagePath || null,
     storage_mime_type: doc.storage_mime_type || doc.storageMimeType || null,
     storage_uploaded_at: doc.storage_uploaded_at || doc.storageUploadedAt || null,
+    extraction_method: doc.extraction_method || doc.extractionMethod || null, // migration 006
+    error_message: doc.error_message || doc.error || null,                    // migration 006
   };
 }
 

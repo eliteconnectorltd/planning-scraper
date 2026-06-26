@@ -84,4 +84,24 @@ function detectPlatform(url) {
   return 'unknown';
 }
 
-module.exports = { detectPlatform };
+/**
+ * Maps a URL to the ADAPTER that should run, preserving detectPlatform's exact
+ * classification and internal ordering. The three platforms with dedicated
+ * adapters route to themselves; everything else (northgate, socrata, unknown)
+ * falls back to the generic harvester.
+ *
+ * NOTE: this does NOT change detectPlatform — applications.platform still records
+ * the true platform (e.g. 'northgate'); routing is a separate concern.
+ *
+ * @param {string} url
+ * @returns {'idox'|'arcus'|'salesforce'|'generic'}
+ */
+function routeAdapter(url) {
+  const platform = detectPlatform(url);
+  if (platform === 'idox' || platform === 'arcus' || platform === 'salesforce') {
+    return platform;
+  }
+  return 'generic';
+}
+
+module.exports = { detectPlatform, routeAdapter };

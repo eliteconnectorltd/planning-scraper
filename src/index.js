@@ -14,10 +14,11 @@ const fs = require('fs');
 const path = require('path');
 const { createBrowser } = require('./browser');
 const { getApplications } = require('./planit');
-const { detectPlatform } = require('./detector');
+const { detectPlatform, routeAdapter } = require('./detector');
 const { scrapeIdoxDocuments } = require('./adapters/idox');
 const { scrapeArcusDocuments } = require('./adapters/arcus');
 const { scrapeSalesforceDocuments } = require('./adapters/salesforce');
+const { scrapeGenericDocuments } = require('./adapters/generic');
 const { downloadDocument } = require('./download/downloadManager');
 const { RunManager } = require('./core/runManager');
 const { loadFilter, shouldProcess } = require('./core/postcodeFilter');
@@ -26,9 +27,36 @@ const documentsRepository = require('./db/repositories/documentsRepository');
 const runsRepository = require('./db/repositories/runsRepository');
 const { recordPlatformMetric } = require('./platforms/fingerprint');
 
-// Platforms that run through a Playwright browser context (so downloads can
-// reuse the session). All current adapters use the context.
-const BROWSER_PLATFORMS = ['idox', 'arcus', 'salesforce'];
+// Adapters that run through a Playwright browser context (so downloads can
+// reuse the session). Checked against the ROUTED adapter, not the raw platform.
+const BROWSER_PLATFORMS = ['idox', 'arcus', 'salesforce', 'generic'];
+
+// ── Generic harvester gating (opt-in for first ship) ───────────────────────────
+// GENERIC_ENABLED=true runs the generic harvester for ALL non-adapter councils.
+// GENERIC_COUNCILS=Wandsworth,Birmingham enables it for just those (case-
+// insensitive, matched on app.area) even when GENERIC_ENABLED is false.
+// DISABLE_FIELD_SUPPLEMENT is RESERVED for a future adapter field-supplement pass
+// and is intentionally not wired this ship (generic extracts its own fields).
+const GENERIC_ENABLED = String(process.env.GENERIC_ENABLED || '').toLowerCase() === 'true';
+const GENERIC_COUNCILS = String(process.env.GENERIC_COUNCILS || '')
+  .split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+function isGenericEnabledFor(council) {
+  if (GENERIC_ENABLED) return true;
+  if (!council) return false;
+  return GENERIC_COUNCILS.includes(String(council).toLowerCase());
+}
+
+// Adapter-extracted contact fields (generic only, for now). Returns ONLY the
+// three non-null contact columns so the upsert spread can't clobber anything else.
+function adapterContacts(docsObject) {
+  const md = docsObject && docsObject.metadata;
+  const out = {};
+  if (!md) return out;
+  if (md.applicant_name) out.applicant = md.applicant_name;
+  if (md.agent_name) out.agent = md.agent_name;
+  if (md.case_officer) out.case_officer = md.case_officer;
+  return out;
+}
 
 // ── CONFIG & ENV ──────────────────────────────────────────────────────────────
 // LOCATION maps to Planit's `auth` filter, which expects a COUNCIL/authority key
@@ -197,8 +225,13 @@ async function main() {
         continue;
       }
 
-      const scrapeUrl = app.docsUrl || app.sourceUrl;
-      if (!scrapeUrl) {
+      // Detect & route against the SOURCE/detail URL. docsUrl is council-published
+      // and platform-inconsistent (e.g. Northgate councils publish a comments-page
+      // URL there), so it must NOT drive detection/routing. Fall back to docsUrl
+      // only when there is no source URL at all (so we don't drop those apps).
+      const sourceUrl = app.sourceUrl || app.source_url || null;
+      const detectUrl = sourceUrl || app.docsUrl;
+      if (!detectUrl) {
         runManager.log(`Skipping ${app.title} — no valid scraper URL available`, 'WARNING');
         results.push({
           ...app,
@@ -210,8 +243,28 @@ async function main() {
         continue;
       }
 
-      const platform = detectPlatform(scrapeUrl);
-      runManager.log(`Detected Platform: ${platform.toUpperCase()} for ${scrapeUrl}`);
+      const platform = detectPlatform(detectUrl);
+      const adapter = routeAdapter(detectUrl);
+      // Navigation target: keep Idox's working docs-tab path (docsUrl when present);
+      // every other adapter (Arcus/Salesforce/Generic) navigates the source/detail
+      // URL, never the council-published docsUrl.
+      const scrapeUrl = (adapter === 'idox')
+        ? (app.docsUrl || sourceUrl || detectUrl)
+        : (sourceUrl || detectUrl);
+      runManager.log(`Detected Platform: ${platform.toUpperCase()} (adapter: ${adapter}) for ${scrapeUrl}`);
+      runManager.log(`[diag] URL resolution: app.sourceUrl=${app.sourceUrl} app.docsUrl=${app.docsUrl} resolved sourceUrl=${sourceUrl} detectUrl=${detectUrl} scrapeUrl=${scrapeUrl} platform=${platform} adapter=${adapter}`);
+
+      // Generic harvester is opt-in (first ship). If a council routes to generic
+      // but generic isn't enabled for it, record 'generic_disabled' (we CHOSE not
+      // to attempt — distinct from 'failed') and move on. No browser, no failure.
+      if (adapter === 'generic' && !isGenericEnabledFor(app.area)) {
+        runManager.log(`Generic harvester disabled for council "${app.area}" — set GENERIC_ENABLED=true or add it to GENERIC_COUNCILS to attempt it.`, 'WARNING');
+        results.push({ ...app, platform, documentsCount: 0, documents: [] });
+        await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), platform, scrape_status: 'generic_disabled' }).catch(err => {
+          runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
+        });
+        continue;
+      }
 
       let docsObject = { documents: [], metrics: {} };
       let success = false;
@@ -219,7 +272,7 @@ async function main() {
       let context = null;
       let sourcePage = null;
 
-      if (platform === 'idox') {
+      if (adapter === 'idox') {
         // Lazily initialize browser to conserve assets
         if (!browser) {
           runManager.log('Initializing Playwright browser context...');
@@ -243,7 +296,7 @@ async function main() {
           runManager.log(`Playwright Portal extraction crash: ${err.message}`, 'ERROR');
         }
 
-      } else if (platform === 'arcus') {
+      } else if (adapter === 'arcus') {
         if (!browser) {
           runManager.log('Initializing Playwright browser context...');
           browser = await createBrowser();
@@ -259,7 +312,7 @@ async function main() {
           runManager.log(`Arcus extraction error: ${err.message}`, 'ERROR');
         }
 
-      } else if (platform === 'salesforce') {
+      } else if (adapter === 'salesforce') {
         if (!browser) {
           runManager.log('Initializing Playwright browser context...');
           browser = await createBrowser();
@@ -275,6 +328,25 @@ async function main() {
           runManager.log(`Salesforce extraction error: ${err.message}`, 'ERROR');
         }
 
+      } else if (adapter === 'generic') {
+        if (!browser) {
+          runManager.log('Initializing Playwright browser context...');
+          browser = await createBrowser();
+        }
+        // Fresh context per application (anti-bot session isolation — a challenge
+        // on one council must not carry its signal to the next).
+        context = await browser.newContext({ ignoreHTTPSErrors: true });
+        sourcePage = await context.newPage();
+        if (process.env.TIMEOUT) sourcePage.setDefaultTimeout(Number(process.env.TIMEOUT));
+        try {
+          docsObject = await scrapeGenericDocuments(sourcePage, app, context, scrapeUrl);
+          success = docsObject.extractionConfidence !== 'failed';
+        } catch (err) {
+          error = err;
+          success = false;
+          runManager.log(`Generic extraction error: ${err.message}`, 'ERROR');
+        }
+
       } else {
         runManager.log(`Skipping extraction — unsupported platform: "${platform}"`, 'WARNING');
         error = new Error(`Unsupported platform: ${platform}`);
@@ -285,10 +357,21 @@ async function main() {
       // omits it; Arcus/Salesforce populate it. Never log its contents (secrets).
       const downloadAuth = docsObject.downloadAuth || undefined;
       runManager.recordApplication(app, platform, success, error, documents.length);
+
+      // Final scrape_status. Generic surfaces its own statuses (generic_scraped, or
+      // a terminal hint: blocked_anti_bot / timeout / portal_unreachable / requires_auth).
+      let scrapeStatus;
+      if (adapter === 'generic') {
+        scrapeStatus = docsObject.scrapeStatusHint || (success ? 'generic_scraped' : 'failed');
+      } else {
+        scrapeStatus = success ? 'scraped' : (error && error.code === 'BLOCKED' ? 'blocked' : 'failed');
+      }
+
       await applicationsRepository.upsertApplication({
         ...applyPlanitMetadata(app),
+        ...adapterContacts(docsObject), // adapter contacts win over Planit; only the 3 non-null contact keys
         platform,
-        scrape_status: success ? 'scraped' : (error && error.code === 'BLOCKED' ? 'blocked' : 'failed'),
+        scrape_status: scrapeStatus,
       }).catch(err => {
         runManager.log(`Supabase scrape status persistence failed for ${app.title}: ${err.message}`, 'WARNING');
       });
@@ -305,13 +388,15 @@ async function main() {
 
       // 4. Download extracted files in real-time
       const processedDocs = [];
+      let appDownloaded = 0;
       if (success && documents.length > 0) {
         runManager.log(`Initiating stream downloads for ${documents.length} extracted files... (downloadAuth: ${downloadAuth ? 'present' : 'absent'})`);
         for (const doc of documents) {
           // Pass the context to downloadDocument to preserve session cookies, plus
-          // any adapter-declared downloadAuth (headers/cookies) for this portal.
-          const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, BROWSER_PLATFORMS.includes(platform) ? context : null, downloadAuth);
+          // any adapter-declared downloadAuth and the adapter name (extraction_method).
+          const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, BROWSER_PLATFORMS.includes(adapter) ? context : null, downloadAuth, adapter);
           runManager.recordDownload(downloadRecord.status, downloadRecord.sizeBytes);
+          if (downloadRecord.status === 'downloaded' || downloadRecord.status === 'downloaded_no_storage') appDownloaded++;
           const appRow = await applicationsRepository.findByUid(app.title).catch(() => null);
           await documentsRepository.upsertDocument({ ...doc, ...downloadRecord }, appRow && appRow.id).catch(err => {
             runManager.log(`Supabase document persistence failed for ${doc.name}: ${err.message}`, 'WARNING');
@@ -327,8 +412,20 @@ async function main() {
         }
       }
 
+      // Generic: final confidence for visibility (counts only — never names).
+      // 'high' needs ≥1 field AND ≥1 doc actually downloaded; download success is
+      // only known here (the adapter returns a discovery estimate).
+      if (adapter === 'generic') {
+        const f = (docsObject.metrics && docsObject.metrics.fieldsExtracted) || 0;
+        const finalConfidence = (error || docsObject.scrapeStatusHint) ? 'failed'
+          : (f > 0 && appDownloaded > 0) ? 'high'
+          : (f > 0 || appDownloaded > 0) ? 'medium'
+          : (documents.length > 0) ? 'low' : 'failed';
+        runManager.log(`[generic] ${app.area} ${app.title}: status=${scrapeStatus} fields=${f} docs_found=${documents.length} docs_downloaded=${appDownloaded} confidence=${finalConfidence}`);
+      }
+
       // Close the page and context after downloads are complete
-      if (BROWSER_PLATFORMS.includes(platform) && context) {
+      if (BROWSER_PLATFORMS.includes(adapter) && context) {
         try {
            const pages = context.pages();
            for (const p of pages) { await p.close(); }
