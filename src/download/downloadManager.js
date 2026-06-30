@@ -302,10 +302,14 @@ async function downloadDocumentWithPlaywright(page, docUrl, depth = 0, downloadA
  * Takes an optional `downloadAuth` ({ headers?, cookies? }) declared by the
  * adapter for portals whose downloads need authentication (e.g. Arcus/Salesforce).
  * When omitted/null, behaves exactly as before (public downloads, e.g. Idox).
- * Optional `extractionMethod` ('idox'|'arcus'|'salesforce'|'generic') is recorded
- * on the document row (migration 006) for operational visibility.
+ * Optional `extractionMethod` ('idox'|'arcus'|'salesforce'|'capita'|'generic') is
+ * recorded on the document row (migration 006) for operational visibility.
+ * Optional `knownUrls` (a Set of source URLs already in the DB from a prior run)
+ * enables CROSS-RUN dedup (migration 007): a candidate whose URL is already known
+ * is not re-fetched/re-uploaded. Its document row's last_seen_at is still bumped
+ * (via the finally upsert) because the document is still present on the portal.
  */
-async function downloadDocument(doc, application, council, manifest, context = null, downloadAuth = null, extractionMethod = null) {
+async function downloadDocument(doc, application, council, manifest, context = null, downloadAuth = null, extractionMethod = null, knownUrls = null) {
   const resultRecord = {
     council,
     application: application.title,
@@ -331,6 +335,19 @@ async function downloadDocument(doc, application, council, manifest, context = n
   let localContext = null;
 
   try {
+    // 0. Cross-run dedup (migration 007). If this URL was already downloaded on a
+    //    prior run, skip the fetch+upload entirely. We DO fall through to the
+    //    finally block so the existing document row's last_seen_at is bumped (the
+    //    doc is still present on the portal). The resultRecord already carries
+    //    sourceUrl=doc.url, which — with the application_id resolved in finally —
+    //    is exactly the (application_id, source_url) upsert conflict key, so the
+    //    last_seen_at bump lands on the right row without re-fetching anything.
+    if (knownUrls && doc.url && knownUrls.has(doc.url)) {
+      console.log(`  [dedup] skipping known url (already downloaded in a prior run): ${(doc.url || '').split('?')[0]}`);
+      resultRecord.status = 'skipped_known';
+      return resultRecord;
+    }
+
     // Establish Playwright Page Context
     if (context) {
       page = await context.newPage();

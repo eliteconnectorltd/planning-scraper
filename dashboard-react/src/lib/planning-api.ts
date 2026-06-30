@@ -74,6 +74,7 @@ type SupabaseApplicationRow = {
   council?: string | null;
   address?: string | null;
   proposal?: string | null;
+  status?: string | null;
   decision?: string | null;
   decision_date?: string | null;
   applicant?: string | null;
@@ -206,6 +207,7 @@ async function mapSupabaseApplication(row: SupabaseApplicationRow): Promise<Appl
     council: row.council || "",
     address: row.address || "",
     proposal: row.proposal || "",
+    status: row.status || null,
     decision: row.decision || null,
     decision_date: row.decision_date || null,
     applicant: row.applicant || null,

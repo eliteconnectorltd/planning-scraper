@@ -42,6 +42,7 @@ function mapDocument(doc = {}, applicationId = null) {
   return {
     application_id: applicationId || doc.application_id || null,
     document_name: doc.document_name || doc.name || doc.originalName || 'Document',
+    description: doc.description || null, // migration 008 (Capita gvResults Label2)
     document_type: doc.document_type || doc.type || null,
     document_category: doc.document_category || doc.category || doc.type || null,
     document_date: normalizeDate(documentDate),
@@ -58,6 +59,18 @@ function mapDocument(doc = {}, applicationId = null) {
     storage_uploaded_at: doc.storage_uploaded_at || doc.storageUploadedAt || null,
     extraction_method: doc.extraction_method || doc.extractionMethod || null, // migration 006
     error_message: doc.error_message || doc.error || null,                    // migration 006
+    // Change detection (migration 007):
+    //   first_seen_at is DELIBERATELY OMITTED — the DB default now() sets it on
+    //   INSERT, and because we never send it, an UPSERT-update leaves it intact.
+    //   last_seen_at is bumped on every upsert (incl. skipped_known), so a
+    //   still-present document's observation time advances even when we skip
+    //   re-downloading it.
+    last_seen_at: doc.last_seen_at || doc.lastSeenAt || new Date().toISOString(),
+    //   NOTE: this is the document LIFECYCLE status ('active' | 'removed'), NOT
+    //   the download status. `doc.status` is the DOWNLOAD status (it already
+    //   feeds extraction_status above), so we read `record_status` to avoid that
+    //   collision. 'removed' detection is Phase 5; everything we see now is active.
+    status: doc.record_status || 'active',
   };
 }
 

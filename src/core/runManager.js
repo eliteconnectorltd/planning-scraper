@@ -45,6 +45,8 @@ class RunManager {
       downloadsNoStorage: 0,
       downloadsFailed: 0,
       duplicatesSkipped: 0,
+      downloadsSkippedKnown: 0, // cross-run dedup (migration 007): URL already in DB
+
       errors: {} // Count of each classified error
     };
 
@@ -186,6 +188,9 @@ class RunManager {
       this.metrics.downloadsNoStorage++;
     } else if (status === 'skipped_duplicate') {
       this.metrics.duplicatesSkipped++;
+    } else if (status === 'skipped_known') {
+      // Known from a prior run (cross-run dedup) — not fetched, not a failure.
+      this.metrics.downloadsSkippedKnown++;
     } else if (status === 'failed') {
       this.metrics.downloadsFailed++;
     }
@@ -300,6 +305,7 @@ class RunManager {
         downloadsNoStorage: this.metrics.downloadsNoStorage,
         downloadsFailed: this.metrics.downloadsFailed,
         duplicatesSkipped: this.metrics.duplicatesSkipped,
+        downloadsSkippedKnown: this.metrics.downloadsSkippedKnown,
         applicationsSkippedByFilter: this.applicationsSkippedByFilter
       },
       errorClassification: this.metrics.errors,

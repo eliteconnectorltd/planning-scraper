@@ -37,6 +37,7 @@ export interface ApplicationRecord {
   council: string;
   address: string;
   proposal: string;
+  status: string | null;
   decision: string | null;
   decision_date: string | null;
   applicant: string | null;

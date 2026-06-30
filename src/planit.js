@@ -188,20 +188,33 @@ async function fetchJsonWithRetry(url) {
 /**
  * Returns a raw list of recent applications from the Planit list API.
  */
-async function fetchApplicationList(days = 4, limit = 5, areaName = '') {
-  const params = new URLSearchParams({
-    recent: String(days),
-    pg_sz: String(limit),
-    max_recs: String(limit),
-    sort: 'start_date.desc.nullslast,last_scraped.desc.nullslast',
-    select: 'name,uid,altid,area_name,start_date,address,description,link',
-  });
+async function fetchApplicationList(days = 4, limit = 5, areaName = '', dateRange = null) {
+  const useRange = Boolean(dateRange && dateRange.startDate && dateRange.endDate);
+
+  // Build params in a stable order. Absolute range uses Planit's start_date__gte /
+  // start_date__lte filters INSTEAD of `recent`; everything else is unchanged.
+  const params = new URLSearchParams();
+  if (useRange) {
+    // Planit's absolute window filters on the application start_date field:
+    //   start_date = floor (inclusive), end_date = ceiling (inclusive).
+    // (NOT Django-style start_date__gte/__lte — the live API rejects those with
+    //  "date restrictions required". Verified against /api/applics/json.)
+    params.append('start_date', dateRange.startDate);
+    params.append('end_date', dateRange.endDate);
+  } else {
+    params.append('recent', String(days));
+  }
+  params.append('pg_sz', String(limit));
+  params.append('max_recs', String(limit));
+  params.append('sort', 'start_date.desc.nullslast,last_scraped.desc.nullslast');
+  params.append('select', 'name,uid,altid,area_name,start_date,address,description,link');
 
   if (areaName) {
     params.append('auth', areaName);  // Planit's council filter is 'auth', not 'area_name'
   }
 
   const url = `${PLANIT_BASE}/api/applics/json?${params.toString()}`;
+  console.log(`[planit] Mode: ${useRange ? `date range ${dateRange.startDate}..${dateRange.endDate}` : `rolling window, last ${days} days`}`);
   console.log(`[planit] Fetching list API: ${url}`);
 
   const json = await fetchJsonWithRetry(url);
@@ -370,7 +383,7 @@ async function fetchApplicationDetail(planitPageUrl) {
  * Fetches recent planning applications from Planit and enriches each with
  * the council portal URL and docs URL from the detail API.
  */
-async function getApplications(pageOrDays, locationOrLimit, optionalAreaName) {
+async function getApplications(pageOrDays, locationOrLimit, optionalAreaName, dateRange = null) {
   let days = 4;
   let limit = 5;
   let areaName = '';
@@ -383,9 +396,12 @@ async function getApplications(pageOrDays, locationOrLimit, optionalAreaName) {
     areaName = optionalAreaName || '';
   }
 
-  console.log(`\n[planit] === Fetching up to ${limit} applications (last ${days} days, area: ${areaName || 'all'}) ===`);
+  const windowStr = (dateRange && dateRange.startDate && dateRange.endDate)
+    ? `date range ${dateRange.startDate}..${dateRange.endDate}`
+    : `last ${days} days`;
+  console.log(`\n[planit] === Fetching up to ${limit} applications (${windowStr}, area: ${areaName || 'all'}) ===`);
 
-  const listRecords = await fetchApplicationList(days, limit, areaName);
+  const listRecords = await fetchApplicationList(days, limit, areaName, dateRange);
   const applications = [];
 
   for (const record of listRecords) {

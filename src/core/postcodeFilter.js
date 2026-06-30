@@ -16,7 +16,7 @@ const { getCoveredPostcodeAreas } = require('../db/repositories/spProfilesReposi
 
 // Outward+inward UK postcode; capture group 1 = the leading 1-2 letters
 // (the postcode AREA) of the outward code. e.g. "CR7 6DP" → "CR", "W1K 1AA" → "W".
-const POSTCODE_AREA_REGEX = /\b([A-Z]{1,2})\d[A-Z\d]?\s*\d[A-Z]{2}\b/i;
+const POSTCODE_AREA_REGEX = /\b([A-Z]{1,2})\d[A-Z\d]?(?:\s*\d[A-Z]{2})?\b/i;
 
 /**
  * Loads the provider-coverage filter once, at the start of a run.

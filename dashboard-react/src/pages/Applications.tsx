@@ -4,17 +4,29 @@ import { Search } from "lucide-react";
 import { getApplicationsPage } from "@/lib/planning-api";
 import { Loading } from "@/components/loading";
 
-function statusClass(decision?: string | null) {
-  const value = String(decision || "PENDING").toUpperCase();
-  if (value.includes("GRANT") || value.includes("APPROV")) return "border-green-200 bg-green-50 text-green-700";
-  if (value.includes("REFUS")) return "border-red-200 bg-red-50 text-red-700";
-  if (value.includes("WITHDRAW")) return "border-slate-200 bg-slate-100 text-slate-600";
-  return "border-amber-200 bg-amber-50 text-amber-700";
+function statusClass(status?: string | null) {
+  const value = String(status || "PENDING").toUpperCase();
+  if (value.includes("GRANT") || value.includes("APPROV") || value.includes("PERMIT")) {
+    return "border-green-200 bg-green-50 text-green-700";
+  }
+  if (value.includes("REFUS")) {
+    return "border-red-200 bg-red-50 text-red-700";
+  }
+  if (value.includes("WITHDRAW")) {
+    return "border-slate-200 bg-slate-100 text-slate-600";
+  }
+  if (value.includes("FINAL DECISION") || value.includes("DECISION")) {
+    return "border-blue-200 bg-blue-50 text-blue-700";
+  }
+  if (value.includes("REGISTERED")) {
+    return "border-amber-200 bg-amber-50 text-amber-700";
+  }
+  return "border-amber-200 bg-amber-50 text-amber-700"; // default: pending-like
 }
 
-function cleanStatus(decision?: string | null) {
-  if (!decision || decision === "PENDING") return "Pending";
-  return decision.toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
+function cleanStatus(status?: string | null) {
+  if (!status || status === "PENDING") return "Pending";
+  return status.toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
 }
 
 function formatDate(value?: string | null) {
@@ -168,8 +180,8 @@ export default function Applications() {
                       </td>
                       <td className="px-4 py-3 align-top text-muted-foreground">{app.council || "—"}</td>
                       <td className="px-4 py-3 align-top">
-                        <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${statusClass(app.decision)}`}>
-                          {cleanStatus(app.decision)}
+                        <span className={`inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium ${statusClass(app.status || app.decision)}`}>
+                          {cleanStatus(app.status || app.decision)}
                         </span>
                       </td>
                       <td className="px-4 py-3 align-top text-right tabular-nums text-muted-foreground">{app.documents?.length || 0}</td>

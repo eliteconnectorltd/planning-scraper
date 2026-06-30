@@ -1,9 +1,23 @@
 'use strict';
 
 const { executeWithRetry, getClientOrNull, normalizePage } = require('./baseRepository');
+const { isTerminalStatus } = require('../../utils/terminalStatus');
 
-function mapApplication(app = {}) {
-  return {
+/**
+ * Maps an application object to a DB row.
+ *
+ * @param {object} app
+ * @param {object} [opts] change-detection controls (migration 007). Most call
+ *   sites pass nothing → behaviour is unchanged. The three change-detection
+ *   columns are CONDITIONALLY included so a thin upsert can't clobber them:
+ *   @param {boolean} [opts.lastChecked]      include last_checked_at=now() (only
+ *      sites that actually attempted document extraction set this).
+ *   @param {boolean} [opts.documentsChanged] include documents_last_changed_at=now().
+ *   @param {number}  [opts.recheckCount]     include recheck_count=<n>.
+ *   @param {Date}    [opts.now]              injectable clock for tests.
+ */
+function mapApplication(app = {}, opts = {}) {
+  const row = {
     application_uid: app.application_uid || app.title || app.application_id || app.uid,
     council: app.council || app.area || null,
     platform: app.platform || null,
@@ -43,6 +57,36 @@ function mapApplication(app = {}) {
     map_url: app.map_url || null,
     scrape_status: app.scrape_status || app.scrapeStatus || null,
   };
+
+  // ── Change-detection columns (migration 007) — CONDITIONALLY included ───────
+  // These break the "emit every column" rule on purpose: emitting null/false for
+  // them on every upsert would clobber the DB value on thin status-only writes.
+  // We only add the key when the caller signals it applies; otherwise the column
+  // is left untouched on update (and uses its DB default on first insert).
+  const now = opts.now || new Date();
+
+  // last_checked_at: ONLY when we actually attempted document extraction
+  // (terminal-skip, post-scrape, resume re-check). Use updated_at for generic
+  // "last touched". Not stamped on filter/queued/missing_url/generic_disabled.
+  if (opts.lastChecked === true) row.last_checked_at = now;
+
+  // is_terminal: emit a concrete boolean ONLY when the status is KNOWN.
+  //   - status set + terminal     → true
+  //   - status set + not terminal → false (explicit, so known-active rows are
+  //                                 false, not null — fixes pre-migration/thin-
+  //                                 upsert nulls going forward)
+  //   - status absent             → OMIT (preserve existing DB value; a thin
+  //                                 upsert that doesn't carry status must never
+  //                                 flip a previously-terminal app back to active)
+  if (app.status) row.is_terminal = isTerminalStatus(app.status);
+
+  // documents_last_changed_at: ONLY when the orchestrator detected a change.
+  if (opts.documentsChanged === true) row.documents_last_changed_at = now;
+
+  // recheck_count: ONLY when the caller computed it (read-before-write).
+  if (typeof opts.recheckCount === 'number') row.recheck_count = opts.recheckCount;
+
+  return row;
 }
 
 /**
@@ -57,11 +101,12 @@ function mapApplication(app = {}) {
 /**
  * Upserts a planning application by `application_uid`.
  * @param {object} app
+ * @param {object} [opts] forwarded to mapApplication (change-detection columns)
  * @returns {Promise<ApplicationRow|null>}
  */
-async function upsertApplication(app) {
+async function upsertApplication(app, opts = {}) {
   const client = getClientOrNull();
-  const row = mapApplication(app);
+  const row = mapApplication(app, opts);
   if (!client || !row.application_uid) return null;
 
   return executeWithRetry(async () => client

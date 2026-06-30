@@ -94,12 +94,20 @@ function detectPlatform(url) {
  * the true platform (e.g. 'northgate'); routing is a separate concern.
  *
  * @param {string} url
- * @returns {'idox'|'arcus'|'salesforce'|'generic'}
+ * @returns {'idox'|'arcus'|'salesforce'|'capita'|'generic'}
  */
 function routeAdapter(url) {
   const platform = detectPlatform(url);
   if (platform === 'idox' || platform === 'arcus' || platform === 'salesforce') {
     return platform;
+  }
+  // Capita Planning Case documents subsystem. String match only (same convention
+  // as detectPlatform): route to the no-Playwright capita adapter when the URL
+  // already carries the comments path. Northgate DETAIL urls that don't (the
+  // comments link is only discoverable after a GET) fall through to generic for
+  // the first ship — generic records the cross-domain link for future auto-defer.
+  if (url && /planningcase\/comments\.aspx/i.test(url)) {
+    return 'capita';
   }
   return 'generic';
 }
