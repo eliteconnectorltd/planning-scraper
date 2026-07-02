@@ -28,6 +28,8 @@ const applicationsRepository = require('./db/repositories/applicationsRepository
 const documentsRepository = require('./db/repositories/documentsRepository');
 const runsRepository = require('./db/repositories/runsRepository');
 const { recordPlatformMetric } = require('./platforms/fingerprint');
+const runLogger = require('./logging/runLogger');
+const { documentReason, metadataReason } = require('./logging/reasonCodes');
 
 // Adapters that run through a Playwright browser context (so downloads can
 // reuse the session). Checked against the ROUTED adapter, not the raw platform.
@@ -61,15 +63,26 @@ function isCapitaCommentsUrl(u) {
   }
 }
 
-// Adapter-extracted contact fields (generic only, for now). Returns ONLY the
-// three non-null contact columns so the upsert spread can't clobber anything else.
+// Adapter-extracted metadata → application columns. Every active adapter now
+// returns a `metadata` object (Idox Details tab, Northgate detail page, Arcus/
+// Salesforce APIs). We map ONLY the non-empty fields so the upsert spread never
+// clobbers a previously-good value with null. Adapter keys use the *_name suffix
+// convention (applicant_name/agent_name) established by the Capita adapter.
 function adapterContacts(docsObject) {
   const md = docsObject && docsObject.metadata;
   const out = {};
   if (!md) return out;
-  if (md.applicant_name) out.applicant = md.applicant_name;
-  if (md.agent_name) out.agent = md.agent_name;
-  if (md.case_officer) out.case_officer = md.case_officer;
+  const setIf = (col, val) => {
+    if (val !== null && val !== undefined && String(val).trim() !== '') out[col] = val;
+  };
+  setIf('applicant', md.applicant_name);
+  setIf('agent', md.agent_name);
+  setIf('case_officer', md.case_officer);
+  setIf('agent_company', md.agent_company);
+  setIf('agent_address', md.agent_address);
+  setIf('decision', md.decision);
+  setIf('target_decision_date', md.target_decision_date);
+  setIf('consultation_start_date', md.consultation_start_date);
   return out;
 }
 
@@ -153,6 +166,41 @@ async function main() {
   runManager.log('=== Planning Scraper Operational Run ===');
   runManager.log(`Config: LOCATION="${LOCATION}", FETCH_DAYS=${DAYS_TO_FETCH}, LIMIT=${MAX_APPLICATIONS}`);
 
+  // ── Structured run logging (migration 011). Additive: writes to scrape_runs /
+  // scrape_events; never alters console output (mirror is opt-in via RUNLOGGER_CONSOLE).
+  await runLogger.startRun({
+    trigger: process.env.SCRAPER_TRIGGER || 'manual',
+    configSnapshot: {
+      LOCATION, DAYS_TO_FETCH, MAX_APPLICATIONS,
+      START_DATE: START_DATE || null, END_DATE: END_DATE || null,
+      GENERIC_ENABLED, GENERIC_COUNCILS,
+    },
+    scraperVersion: require('../package.json').version,
+  });
+  runLogger.info({ stage: 'run_start', message: 'Scraper run started' });
+
+  // Flush + finalize buffered logs on Ctrl+C / termination (status='aborted').
+  const onSignal = (sig, code) => {
+    runLogger.warn({ stage: 'run_finish', message: `Received ${sig}, flushing logs and exiting` });
+    runLogger.finishRun({ status: 'aborted' }).finally(() => process.exit(code));
+  };
+  process.once('SIGINT', () => onSignal('SIGINT', 130));
+  process.once('SIGTERM', () => onSignal('SIGTERM', 143));
+
+  // Per-council roll-up for run counters (ok/fail computed from real scrape outcomes,
+  // not skips). councils_attempted increments on first sight of each council.
+  const councilStats = new Map();
+  const registerCouncil = (council) => {
+    if (!councilStats.has(council)) {
+      councilStats.set(council, { ok: 0, fail: 0 });
+      runLogger.incrementCounter('councils_attempted');
+      runLogger.info({ stage: 'council_start', council, message: 'Starting council' });
+    }
+    return councilStats.get(council);
+  };
+  let runFailed = false;
+  let runError = null;
+
   // Resolve the feed window (rolling vs absolute date range). On a bad date config,
   // log a specific error and exit cleanly (exit 1) — no crash, nothing started yet.
   const dateResolution = resolveDateRange(START_DATE, END_DATE, DAYS_TO_FETCH);
@@ -185,6 +233,8 @@ async function main() {
     // 1. Fetch from Planit API
     runManager.log('Fetching application feed from Planit JSON API...');
     const incomingApps = await getApplications(DAYS_TO_FETCH, MAX_APPLICATIONS, LOCATION, dateRange);
+    runLogger.info({ stage: 'planit_fetch', message: 'Fetched batch from PlanIt', details: { count: incomingApps.length, location: LOCATION || 'all', dateRange: dateRange || null } });
+    runLogger.incrementCounter('applications_seen', incomingApps.length);
     // Initial fetch: persist with the Planit detail metadata folded into columns.
     await applicationsRepository.upsertApplications(incomingApps.map(applyPlanitMetadata)).catch(err => {
       runManager.log(`Supabase application batch persistence failed: ${err.message}`, 'WARNING');
@@ -198,6 +248,8 @@ async function main() {
       }
       fs.writeFileSync(OUTPUT_FILE, JSON.stringify([], null, 2));
       runManager.finalize();
+      runLogger.info({ stage: 'run_finish', message: 'Scraper run completed (no applications)' });
+      await runLogger.finishRun({ status: 'completed' });
       return;
     }
 
@@ -214,6 +266,10 @@ async function main() {
 
     // 3. Process Applications
     for (const app of queue) {
+      const councilName = app.area || 'Unknown';
+      registerCouncil(councilName);
+      const appStartedAt = Date.now();
+
       // ── Postcode-area coverage gate (applies to ALL adapters) ──────────────
       // Runs before resume-check / detectPlatform / status upsert so an
       // uncovered application never gets scraped or downloaded by any path.
@@ -221,6 +277,8 @@ async function main() {
       if (!decision.allowed) {
         runManager.recordFilterSkip(app, decision.reason);
         runManager.log(`[filter] SKIP ${app.title}  (${decision.reason})`, 'WARNING');
+        runLogger.info({ stage: 'postcode_skip', council: councilName, applicationUid: app.title, message: 'Skipped — outside postcode filter', details: { reason_code: 'skipped_postcode_filter', reason_message: decision.reason || 'Outside covered postcode areas', address: app.address || null } });
+        runLogger.incrementCounter('applications_skipped_filter');
         await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), scrape_status: 'skipped_filter' }).catch(err => {
           runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
         });
@@ -252,9 +310,11 @@ async function main() {
         // Defensive: explicit === true (null/false/undefined all mean "active").
         if (existing.is_terminal === true && (existing.recheck_count || 0) > 0) {
           runManager.log(`Skipping terminal application: ${app.title} (status: ${existing.status || 'n/a'})`);
+          runLogger.info({ stage: 'terminal_skip', council: councilName, applicationUid: app.title, message: 'Skipped — terminal state', details: { reason_code: 'skipped_terminal', reason_message: `Terminal status "${existing.status || 'n/a'}" already scraped (recheck_count=${existing.recheck_count || 0})`, status: existing.status || null, is_terminal: existing.is_terminal, recheck_count: existing.recheck_count } });
+          runLogger.incrementCounter('applications_skipped_terminal');
           await applicationsRepository.upsertApplication(
             { ...applyPlanitMetadata(app), scrape_status: 'skipped_terminal' },
-            { lastChecked: true, recheckCount }
+            { lastChecked: true, recheckCount, setTerminalFromStatus: true }
           ).catch(err => {
             runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
           });
@@ -269,7 +329,10 @@ async function main() {
       }
 
       runManager.log(`Processing application: ${app.title} (Council: ${app.area || 'Unknown'})`);
-      await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), scrape_status: app.skipped_resume ? 'skipped_resume' : 'queued' }, { recheckCount }).catch(err => {
+      // 'queued' is a thin pre-adapter marker: do NOT bump recheck_count here — that
+      // would re-arm the terminal gate before we've secured any documents. The counter
+      // is bumped by the post-scrape upsert (or the terminal-skip upsert) only.
+      await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), scrape_status: app.skipped_resume ? 'skipped_resume' : 'queued' }).catch(err => {
         runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
       });
 
@@ -288,6 +351,9 @@ async function main() {
           // already persisted in a prior run are not re-downloaded.
           const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, null, null, null, knownUrls);
           runManager.recordDownload(downloadRecord.status, downloadRecord.sizeBytes);
+          if (downloadRecord.status === 'downloaded' || downloadRecord.status === 'downloaded_no_storage') runLogger.incrementCounter('documents_downloaded');
+          else if (downloadRecord.status === 'skipped_known') runLogger.incrementCounter('documents_skipped_known');
+          else if (downloadRecord.status === 'failed') runLogger.incrementCounter('documents_failed');
           const appRow = await applicationsRepository.findByUid(app.title).catch(() => null);
           await documentsRepository.upsertDocument({ ...doc, ...downloadRecord }, appRow && appRow.id).catch(err => {
             runManager.log(`Supabase resumed document persistence failed: ${err.message}`, 'WARNING');
@@ -310,6 +376,8 @@ async function main() {
       const detectUrl = sourceUrl || app.docsUrl;
       if (!detectUrl) {
         runManager.log(`Skipping ${app.title} — no valid scraper URL available`, 'WARNING');
+        runLogger.warn({ stage: 'missing_url_skip', council: councilName, applicationUid: app.title, message: 'Skipped — no valid portal URL available', details: { reason_code: 'skipped_missing_url', reason_message: 'No source_url or docs_url from Planit' } });
+        councilStats.get(councilName).fail++;
         results.push({
           ...app,
           platform: 'unknown',
@@ -353,12 +421,14 @@ async function main() {
       }
       runManager.log(`Detected Platform: ${platform.toUpperCase()} (adapter: ${adapter}) for ${scrapeUrl}`);
       runManager.log(`[diag] URL resolution: app.sourceUrl=${app.sourceUrl} app.docsUrl=${app.docsUrl} resolved sourceUrl=${sourceUrl} detectUrl=${detectUrl} scrapeUrl=${scrapeUrl} platform=${platform} adapter=${adapter}`);
+      runLogger.info({ stage: 'application_start', council: councilName, applicationUid: app.title, adapter, message: 'Processing application', details: { platform, scrapeUrl } });
 
       // Generic harvester is opt-in (first ship). If a council routes to generic
       // but generic isn't enabled for it, record 'generic_disabled' (we CHOSE not
       // to attempt — distinct from 'failed') and move on. No browser, no failure.
       if (adapter === 'generic' && !isGenericEnabledFor(app.area)) {
         runManager.log(`Generic harvester disabled for council "${app.area}" — set GENERIC_ENABLED=true or add it to GENERIC_COUNCILS to attempt it.`, 'WARNING');
+        runLogger.info({ stage: 'generic_disabled', council: councilName, applicationUid: app.title, adapter, message: 'Skipped — generic harvester disabled for this council', details: { reason_code: 'skipped_generic_disabled', reason_message: 'Generic harvester not enabled for this council (GENERIC_ENABLED / GENERIC_COUNCILS)' } });
         results.push({ ...app, platform, documentsCount: 0, documents: [] });
         await applicationsRepository.upsertApplication({ ...applyPlanitMetadata(app), platform, scrape_status: 'generic_disabled' }).catch(err => {
           runManager.log(`Supabase application upsert failed for ${app.title}: ${err.message}`, 'WARNING');
@@ -371,6 +441,8 @@ async function main() {
       let error = null;
       let context = null;
       let sourcePage = null;
+
+      runLogger.info({ stage: 'adapter_start', council: councilName, applicationUid: app.title, adapter, message: 'Adapter invoked' });
 
       if (adapter === 'idox') {
         // Lazily initialize browser to conserve assets
@@ -468,6 +540,53 @@ async function main() {
       // Adapter-declared per-request auth (headers/cookies) for downloads. Idox
       // omits it; Arcus/Salesforce populate it. Never log its contents (secrets).
       const downloadAuth = docsObject.downloadAuth || undefined;
+
+      // Adapter result events. Metadata (contact fields) is best-effort — record which
+      // fields were captured; on hard failure this is 'warn', never a throw.
+      const md = docsObject.metadata || null;
+      const metaReason = metadataReason(md); // { reason_code, reason_message, fields_captured/attempted/null }
+      const fieldsCaptured = metaReason.fields_captured;
+      runLogger.event({
+        level: (success || !error) ? 'info' : 'warn',
+        stage: 'adapter_metadata', council: councilName, applicationUid: app.title, adapter,
+        message: md ? `Metadata extracted (${fieldsCaptured.length} field(s))` : 'No metadata returned by adapter',
+        details: metaReason,
+      });
+      runLogger.info({
+        stage: 'adapter_documents', council: councilName, applicationUid: app.title, adapter,
+        message: `Documents listed: ${documents.length}`,
+        details: { doc_count: documents.length, scrape_status_hint: docsObject.scrapeStatusHint || null },
+      });
+
+      // Diagnostic: on any failure, surface WHAT actually went wrong. recordApplication
+      // logs "Error: Unknown, Class: UNKNOWN" whenever `error` is null — which is the
+      // SOFT-FAILURE case: the adapter returned metrics.success=false without throwing
+      // (no exception ever reached the dispatch catch). Distinguish the two and dump
+      // the real message/name/stack when an exception exists. Logging only — no control
+      // flow change.
+      if (!success) {
+        if (error) {
+          const stackTop = (error.stack || '').split('\n').slice(0, 4).join('\n');
+          runManager.log(
+            `Failure detail for ${app.title} (${platform}/${adapter}):\n` +
+            `  Error message: ${error.message}\n` +
+            `  Error type: ${error.name || (error.constructor && error.constructor.name) || 'Error'}\n` +
+            `  Stack (top):\n${stackTop}`,
+            'WARNING'
+          );
+        } else {
+          // No exception was thrown — the adapter completed but declared failure.
+          const m = docsObject.metrics || {};
+          runManager.log(
+            `Failure detail for ${app.title} (${platform}/${adapter}): SOFT FAILURE — ` +
+            `adapter returned success=false with no exception thrown. ` +
+            `metrics: totalRows=${m.totalRows ?? 'n/a'} validDocs=${m.validDocs ?? 'n/a'} ` +
+            `runtimeMs=${m.runtimeMs ?? 'n/a'} scrapeStatusHint=${docsObject.scrapeStatusHint || 'none'}`,
+            'WARNING'
+          );
+        }
+      }
+
       runManager.recordApplication(app, platform, success, error, documents.length);
 
       // ── Document change detection (migration 007) ────────────────────────────
@@ -491,12 +610,15 @@ async function main() {
         scrapeStatus = success ? 'scraped' : (error && error.code === 'BLOCKED' ? 'blocked' : 'failed');
       }
 
+      // Post-scrape: we've done real work, so this is the ONE place that both bumps
+      // recheck_count and derives the durable is_terminal from the live status
+      // (setTerminalFromStatus). No other pre-adapter/thin path may set is_terminal.
       await applicationsRepository.upsertApplication({
         ...applyPlanitMetadata(app),
         ...adapterContacts(docsObject), // adapter contacts win over Planit; only the 3 non-null contact keys
         platform,
         scrape_status: scrapeStatus,
-      }, { lastChecked: true, documentsChanged, recheckCount }).catch(err => {
+      }, { lastChecked: true, documentsChanged, recheckCount, setTerminalFromStatus: true }).catch(err => {
         runManager.log(`Supabase scrape status persistence failed for ${app.title}: ${err.message}`, 'WARNING');
       });
       await recordPlatformMetric({
@@ -518,9 +640,33 @@ async function main() {
         for (const doc of documents) {
           // Pass the context to downloadDocument to preserve session cookies, plus
           // any adapter-declared downloadAuth and the adapter name (extraction_method).
+          const docStartedAt = Date.now();
           const downloadRecord = await downloadDocument(doc, app, app.area || 'Unknown', manifest, BROWSER_PLATFORMS.includes(adapter) ? context : null, downloadAuth, adapter, knownUrls);
+          const docDurationMs = Date.now() - docStartedAt;
           runManager.recordDownload(downloadRecord.status, downloadRecord.sizeBytes);
           if (downloadRecord.status === 'downloaded' || downloadRecord.status === 'downloaded_no_storage') appDownloaded++;
+          // Structured per-document event: reason_code + labeled fields (see reasonCodes.js).
+          const dlStatus = downloadRecord.status;
+          const reason = documentReason(downloadRecord);
+          const dlDetails = {
+            ...reason,
+            status: dlStatus,
+            doc_name: doc.name || null,
+            doc_url: doc.url || null,
+            bytes: downloadRecord.sizeBytes || null,
+            storage_path: downloadRecord.storagePath || null,
+            duration_ms: docDurationMs,
+          };
+          if (dlStatus === 'downloaded' || dlStatus === 'downloaded_no_storage') {
+            runLogger.info({ stage: 'document_download', council: councilName, applicationUid: app.title, adapter, message: `Document downloaded (${reason.reason_code})`, details: dlDetails, durationMs: docDurationMs });
+            runLogger.incrementCounter('documents_downloaded');
+          } else if (dlStatus === 'skipped_known' || dlStatus === 'skipped_duplicate') {
+            runLogger.info({ stage: 'document_download', council: councilName, applicationUid: app.title, adapter, message: `Document skipped (${reason.reason_code})`, details: dlDetails, durationMs: docDurationMs });
+            if (dlStatus === 'skipped_known') runLogger.incrementCounter('documents_skipped_known');
+          } else if (dlStatus === 'failed') {
+            runLogger.error({ stage: 'document_download', council: councilName, applicationUid: app.title, adapter, message: `Document download failed (${reason.reason_code}): ${downloadRecord.error || 'unknown'}`, details: dlDetails, durationMs: docDurationMs });
+            runLogger.incrementCounter('documents_failed');
+          }
           const appRow = await applicationsRepository.findByUid(app.title).catch(() => null);
           await documentsRepository.upsertDocument({ ...doc, ...downloadRecord }, appRow && appRow.id).catch(err => {
             runManager.log(`Supabase document persistence failed for ${doc.name}: ${err.message}`, 'WARNING');
@@ -559,6 +705,33 @@ async function main() {
         }
       }
 
+      // ── Application outcome → run counters + structured event ────────────────
+      const appDurationMs = Date.now() - appStartedAt;
+      if (success) {
+        councilStats.get(councilName).ok++;
+        runLogger.incrementCounter('applications_scraped_ok');
+        if (documents.length === 0) runLogger.incrementCounter('applications_skipped_no_docs');
+        runLogger.info({
+          stage: 'application_finish', council: councilName, applicationUid: app.title, adapter,
+          message: 'Application scraped successfully',
+          details: { reason_code: documents.length === 0 ? 'scraped_no_docs' : 'scraped_ok', reason_message: `${scrapeStatus} — ${documents.length} doc(s) found, ${appDownloaded} downloaded`, docs_found: documents.length, docs_downloaded: appDownloaded, contact_fields_captured: fieldsCaptured, scrape_status: scrapeStatus },
+          durationMs: appDurationMs,
+        });
+      } else {
+        councilStats.get(councilName).fail++;
+        runLogger.incrementCounter('applications_scraped_failed');
+        const failReason = (error && error.code === 'BLOCKED') ? 'blocked'
+          : error ? 'adapter_error'
+          : docsObject.scrapeStatusHint ? `failed_${docsObject.scrapeStatusHint}`
+          : 'soft_failure';
+        runLogger.error({
+          stage: 'application_finish', council: councilName, applicationUid: app.title, adapter,
+          message: `Application scrape failed: ${error ? error.message : (docsObject.scrapeStatusHint || 'soft failure')}`,
+          details: { reason_code: failReason, reason_message: error ? error.message : (docsObject.scrapeStatusHint || 'adapter returned success=false without throwing'), scrape_status: scrapeStatus, error_type: error ? (error.name || 'Error') : null, error_message: error ? error.message : null, error_stack: error ? (error.stack || '').split('\n').slice(0, 6).join('\n') : null },
+          durationMs: appDurationMs,
+        });
+      }
+
       results.push({
         title: app.title,
         area: app.area,
@@ -583,6 +756,9 @@ async function main() {
 
   } catch (err) {
     runManager.log(`Orchestration loop failure: ${err.message}`, 'ERROR');
+    runFailed = true;
+    runError = err;
+    runLogger.error({ stage: 'run_finish', message: `Fatal error: ${err.message}`, details: { stack: (err.stack || '').split('\n').slice(0, 8).join('\n') } });
   } finally {
     if (browser) {
       runManager.log('Closing Playwright browser context.');
@@ -619,6 +795,19 @@ async function main() {
       runManager.log(`Supabase run completion persistence failed: ${err.message}`, 'WARNING');
     });
   }
+
+  // ── Finalize structured run logging ──────────────────────────────────────────
+  // Council roll-up: succeeded = ≥1 app scraped ok; failed = ≥1 failed AND 0 ok.
+  // Councils with only skips (terminal/filter) count as neither.
+  for (const stats of councilStats.values()) {
+    if (stats.ok > 0) runLogger.incrementCounter('councils_succeeded');
+    else if (stats.fail > 0) runLogger.incrementCounter('councils_failed');
+  }
+  const finalStatus = runFailed
+    ? 'failed'
+    : (runLogger.counters && (runLogger.counters.applications_scraped_failed > 0 || runLogger.counters.councils_failed > 0) ? 'partial' : 'completed');
+  runLogger.info({ stage: 'run_finish', message: `Scraper run finished (status=${finalStatus})` });
+  await runLogger.finishRun({ status: finalStatus, errorSummary: runError ? runError.message : null });
 }
 
 if (require.main === module) {

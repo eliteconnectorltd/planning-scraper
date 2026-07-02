@@ -63,6 +63,27 @@ create policy "anon read change_log"
   to anon
   using (true);
 
+-- 4b. scrape_runs / scrape_events (migration 011 — Runs dashboard page) -------
+-- Only needed IF you lock down RLS. While RLS is OFF on these tables (their
+-- current state after migration 011), the anon role already reads them via the
+-- implicit table grants, so the /runs pages work without this block. Include it
+-- when you enable RLS so the Runs pages keep working under lockdown.
+alter table public.scrape_runs enable row level security;
+drop policy if exists "anon read scrape_runs" on public.scrape_runs;
+create policy "anon read scrape_runs"
+  on public.scrape_runs
+  for select
+  to anon
+  using (true);
+
+alter table public.scrape_events enable row level security;
+drop policy if exists "anon read scrape_events" on public.scrape_events;
+create policy "anon read scrape_events"
+  on public.scrape_events
+  for select
+  to anon
+  using (true);
+
 -- =============================================================================
 -- 5. Storage: signed URLs for private document PDFs
 -- =============================================================================

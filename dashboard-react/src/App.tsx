@@ -5,6 +5,8 @@ import Applications from "@/pages/Applications";
 import ApplicationDetail from "@/pages/ApplicationDetail";
 import Changes from "@/pages/Changes";
 import Analytics from "@/pages/Analytics";
+import Runs from "@/pages/Runs";
+import RunDetail from "@/pages/RunDetail";
 import NotFound from "@/pages/NotFound";
 
 // Replaces the App Router root layout. AppShell wraps every route (the old
@@ -17,6 +19,8 @@ export default function App() {
         <Route path="/applications" element={<Applications />} />
         <Route path="/applications/:id" element={<ApplicationDetail />} />
         <Route path="/changes" element={<Changes />} />
+        <Route path="/runs" element={<Runs />} />
+        <Route path="/runs/:id" element={<RunDetail />} />
         <Route path="/analytics" element={<Analytics />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

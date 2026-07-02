@@ -34,9 +34,9 @@ function chartTooltip() {
 
 function LoadingSkeleton() {
   return (
-    <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-4 px-6 py-6">
+    <div className="page-container">
       <div className="h-16 animate-pulse rounded-lg bg-secondary" />
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[0, 1, 2, 3].map(item => <div key={item} className="h-24 animate-pulse rounded-lg bg-secondary" />)}
       </div>
       <div className="grid gap-4 lg:grid-cols-2">
@@ -93,13 +93,13 @@ export default function Analytics() {
   if (loading) return <LoadingSkeleton />;
 
   return (
-    <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-5 px-6 py-6">
+    <div className="page-container">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight text-foreground">Analytics</h1>
-        <p className="mt-1 text-sm text-muted-foreground">Council activity, decision outcomes, document mix, and update cadence.</p>
+        <h1 className="page-title">Analytics</h1>
+        <p className="page-description">Council activity, decision outcomes, document mix, and update cadence.</p>
       </header>
 
-      <section className="grid gap-4 md:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {[
           { label: "Applications", value: records.length },
           { label: "Documents", value: analytics.totalDocs },
@@ -108,7 +108,7 @@ export default function Analytics() {
         ].map(item => (
           <div key={item.label} className="card-surface p-4">
             <div className="text-2xl font-semibold tabular-nums text-foreground">{item.value}</div>
-            <div className="mt-1 text-sm text-muted-foreground">{item.label}</div>
+            <div className="page-description">{item.label}</div>
           </div>
         ))}
       </section>
@@ -116,12 +116,12 @@ export default function Analytics() {
       <section className="grid gap-4 xl:grid-cols-2">
         <div className="card-surface p-4">
           <h2 className="mb-4 text-sm font-semibold text-foreground">Applications by council</h2>
-          <div className="h-72">
+          <div className="h-64 sm:h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analytics.councils} layout="vertical" margin={{ top: 4, right: 16, left: 50, bottom: 4 }}>
+              <BarChart data={analytics.councils} layout="vertical" margin={{ top: 4, right: 8, left: 16, bottom: 4 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={GRID} horizontal={false} />
                 <XAxis type="number" stroke={AXIS} fontSize={12} />
-                <YAxis dataKey="name" type="category" stroke={AXIS} fontSize={12} width={110} />
+                <YAxis dataKey="name" type="category" stroke={AXIS} fontSize={12} width={92} tickLine={false} />
                 <Tooltip cursor={{ fill: "rgba(0,0,0,.04)" }} contentStyle={chartTooltip()} />
                 <Bar dataKey="count" fill="#2563eb" radius={[0, 3, 3, 0]} />
               </BarChart>
@@ -131,7 +131,7 @@ export default function Analytics() {
 
         <div className="card-surface p-4">
           <h2 className="mb-4 text-sm font-semibold text-foreground">Decision outcomes</h2>
-          <div className="grid h-72 items-center gap-4 md:grid-cols-[1fr_180px]">
+          <div className="grid min-h-72 items-center gap-4 md:grid-cols-[1fr_180px]">
             {analytics.decisions.length <= 1 ? (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 {analytics.decisions[0]?.value || 0} records
@@ -162,11 +162,11 @@ export default function Analytics() {
 
         <div className="card-surface p-4">
           <h2 className="mb-4 text-sm font-semibold text-foreground">Documents by type</h2>
-          <div className="h-72">
+          <div className="h-64 sm:h-72">
             <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={analytics.documents} margin={{ top: 4, right: 16, left: 0, bottom: 24 }}>
+              <BarChart data={analytics.documents} margin={{ top: 4, right: 8, left: 0, bottom: 36 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />
-                <XAxis dataKey="name" stroke={AXIS} fontSize={12} angle={-10} textAnchor="end" height={58} />
+                <XAxis dataKey="name" stroke={AXIS} fontSize={11} angle={-18} textAnchor="end" height={70} interval={0} />
                 <YAxis stroke={AXIS} fontSize={12} />
                 <Tooltip cursor={{ fill: "rgba(0,0,0,.04)" }} contentStyle={chartTooltip()} />
                 <Bar dataKey="count" fill="#475569" radius={[3, 3, 0, 0]} />
@@ -177,7 +177,7 @@ export default function Analytics() {
 
         <div className="card-surface p-4">
           <h2 className="mb-4 text-sm font-semibold text-foreground">Weekly activity</h2>
-          <div className="h-72">
+          <div className="h-64 sm:h-72">
             <ResponsiveContainer width="100%" height="100%">
               <LineChart data={analytics.weekly} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke={GRID} vertical={false} />

@@ -31,6 +31,14 @@ separate `planning2.{council}/planningcase/` + `/IAM/` Capita store.
 4. **Build document records** — one per `docid`, URL per the chosen strategy below,
    `confidence:'HIGH'`. Returns them; **the orchestrator downloads** via the shared
    downloadManager (`extraction_method='capita-planning-case'`).
+5. **Contact/decision fields from the Northgate detail page** (different host — the
+   comments page does not carry them). If `navUrl` was already the Northgate detail
+   page (Step 1's fetch), that HTML is reused; otherwise the app's `source_url` is
+   fetched **once**. `parseNorthgateContactFields()` extracts `applicant_name`,
+   `agent_name`, `case_officer`, `decision`, `target_decision_date` into
+   `result.metadata`, which the orchestrator folds into the `applications` row via
+   `adapterContacts`. Best-effort: any failure leaves the fields `null` (never fails
+   the scrape). ⚠️ Label set verified only against the Wandsworth layout.
 
 ### Per-row metadata parsing (verified on 2024/0307 — 97 docs, 5 categories)
 
@@ -111,9 +119,14 @@ categories may 404 or mislabel).
 
 ## Honest limits
 
-- **Contact fields** (applicant/agent/case_officer) are **not** on the comments page
-  (they live on the Northgate detail page, a different host) → returned `null`.
-  Planit already supplies much of this. A secondary detail-page fetch is Phase 5.
+- **Contact fields** (applicant/agent/case_officer/decision/target date) are **not**
+  on the comments page — they live on the Northgate detail page (a different host).
+  As of the contact-fields work these ARE now captured via a **secondary detail-page
+  fetch** (Step 5 above), reusing the detail HTML when `navUrl` was already the detail
+  page. Parsing is regex-over-labels and **verified only against Wandsworth** — the
+  label set (`Applicant Name`/`Agent Name`/`Case Officer`/`Decision Type`/`Target
+  Determination Date`) must be re-checked per council. Planit still supplies fallbacks
+  for some of these; the portal value wins when present (non-null only, no clobber).
 - **Northgate-detail-only councils** whose comments link is *not* in Planit's
   `source_url`/`docs_url` fall to `generic` for the first ship. Generic records the
   cross-domain `planningcase` link (`crossDomainDocLinks`) as telemetry for a future

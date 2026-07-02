@@ -51,13 +51,13 @@
   Light, neutral, information-dense theme.
   Greyscale + a single blue accent. Color is reserved for decision status,
   surfaced per-component (granted/refused/pending/withdrawn). No gradients,
-  no glass, no shadows — depth comes from a flat canvas + white surfaces +
-  1px borders.
+  no glass and no heavy effects - depth comes from a flat canvas, white surfaces,
+  1px borders, and very soft elevation.
 */
 :root {
   --radius: 0.5rem;
 
-  --background: #f8fafc;        /* app canvas */
+  --background: #f6f8fb;        /* app canvas */
   --foreground: #111827;        /* primary text */
   --card: #ffffff;              /* surfaces: cards, sidebar, header, table */
   --card-foreground: #111827;
@@ -69,13 +69,13 @@
   --secondary: #f1f5f9;
   --secondary-foreground: #1f2937;
   --muted: #f1f5f9;
-  --muted-foreground: #6b7280;  /* secondary text — 4.8:1 on white */
+  --muted-foreground: #6b7280;  /* secondary text - 4.8:1 on white */
   --accent: #eff6ff;            /* subtle accent bg: active nav, selected row */
   --accent-foreground: #1d4ed8;
   --destructive: #dc2626;
 
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
   --input: #e5e7eb;
   --ring: #2563eb;
 
@@ -112,17 +112,50 @@
 @layer components {
   /*
     One flat surface primitive. The old .glass-panel / .premium-card names are
-    kept (so existing markup inherits) but now resolve to the same plain card:
-    white surface, 1px border, no shadow, no blur, no hover transform.
+    kept so existing markup inherits the same plain card treatment.
   */
   .card-surface,
   .glass-panel,
   .premium-card {
-    @apply rounded-lg border border-border bg-card;
+    @apply rounded-lg border border-border bg-card shadow-[0_1px_2px_rgba(15,23,42,0.04)];
   }
 
   /* Opt-in hover for clickable surfaces: darken border only. */
   .card-interactive {
     @apply transition-colors hover:border-border-strong;
   }
+
+  .page-container {
+    @apply mx-auto flex w-full max-w-[1200px] flex-col gap-5 px-4 py-4 sm:px-5 sm:py-5 lg:px-6 lg:py-6;
+  }
+
+  .page-header {
+    @apply flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between;
+  }
+
+  .page-title {
+    @apply text-xl font-semibold tracking-tight text-foreground sm:text-2xl;
+  }
+
+  .page-description {
+    @apply mt-1 max-w-3xl text-sm leading-6 text-muted-foreground;
+  }
+
+  .form-control {
+    @apply h-10 rounded-md border border-border bg-card px-3 text-sm text-foreground outline-none transition-colors focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-ring/30;
+  }
+
+  .icon-button {
+    @apply inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-border bg-card text-muted-foreground transition-colors hover:border-border-strong hover:bg-secondary hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/30;
+  }
+
+  .table-card-row {
+    @apply rounded-lg border border-border bg-card p-4 shadow-[0_1px_2px_rgba(15,23,42,0.04)] transition-colors hover:border-border-strong;
+  }
+
+  .section-kicker {
+    @apply text-[11px] font-medium uppercase tracking-wide text-muted-foreground;
+  }
 }
+
+

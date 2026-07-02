@@ -93,3 +93,72 @@ export interface ChangeLogEntry {
   summary: DiffSummary;
   changes: ChangePayload;
 }
+
+// ── Structured scraper logging (migration 011: scrape_runs / scrape_events) ────
+export type ScrapeRunStatus = 'running' | 'completed' | 'failed' | 'partial' | 'aborted';
+export type ScrapeEventLevel = 'info' | 'warn' | 'error' | 'debug';
+
+export interface ScrapeRun {
+  id: string;
+  started_at: string;
+  finished_at: string | null;
+  status: ScrapeRunStatus;
+  trigger: string;
+  councils_attempted: number;
+  councils_succeeded: number;
+  councils_failed: number;
+  applications_seen: number;
+  applications_scraped_ok: number;
+  applications_scraped_failed: number;
+  applications_skipped_terminal: number;
+  applications_skipped_filter: number;
+  applications_skipped_no_docs: number;
+  documents_downloaded: number;
+  documents_skipped_known: number;
+  documents_failed: number;
+  error_summary: string | null;
+  config_snapshot: Record<string, unknown> | null;
+  hostname: string | null;
+  scraper_version: string | null;
+  created_at: string;
+}
+
+export interface ScrapeEvent {
+  id: number;
+  run_id: string;
+  ts: string;
+  level: ScrapeEventLevel;
+  stage: string;
+  council: string | null;
+  application_uid: string | null;
+  adapter: string | null;
+  message: string;
+  details: Record<string, unknown> | null;
+  duration_ms: number | null;
+}
+
+// Enriched `details` shapes for specific event stages. All fields optional —
+// events written before the reason-code change won't have them; `ScrapeEvent.details`
+// stays `Record<string, unknown> | null` and pages narrow to these where needed.
+export interface DocumentEventDetails {
+  status?: 'downloaded' | 'skipped' | 'failed';
+  reason_code?: string;
+  reason_message?: string;
+  doc_url?: string;
+  doc_name?: string | null;
+  http_status?: number;
+  error_message?: string;
+  error_stack?: string;
+  bytes?: number;
+  storage_path?: string;
+  duration_ms?: number;
+}
+
+export interface AdapterMetadataEventDetails {
+  reason_code?: string;
+  reason_message?: string;
+  fields_captured?: string[];
+  fields_attempted?: string[];
+  fields_null?: string[];
+  error_message?: string;
+}

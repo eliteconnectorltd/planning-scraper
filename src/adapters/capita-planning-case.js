@@ -284,6 +284,111 @@ function buildDocUrl(host, docid) {
   return `https://${host}/IAM/IAMLink.aspx?docid=${docid}`;
 }
 
+// ── Northgate detail-page contact/decision fields ────────────────────────────
+// The Capita comments.aspx page does NOT expose applicant/agent/case_officer/
+// decision — those live on the Northgate `planning.{council}` DETAIL page (a
+// different host). This parses that page's label/value pairs. Idox-style tolerant
+// matching: <th>Label</th><td>Value</td>, <td>Label</td><td>Value</td>, and
+// <dt>Label</dt><dd>Value</dd>, with the label anchored to its closing tag (after
+// an optional colon) so "Agent" can't match an "Agent Name" cell.
+// CAVEAT: Northgate skins vary per council; this label set is verified only against
+// the Wandsworth layout — re-check when onboarding a new council (no per-council code).
+const NG_PLACEHOLDER = /^(?:-+|—|n\/?a|not\s+available|none|tbc|unknown)$/i;
+
+function ngLabeledValue(html, labels) {
+  const alt = labels
+    .map(l => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+'))
+    .join('|');
+  const label = `(?:${alt})`;
+  const decoded = decodeEntities(String(html || ''));
+  const patterns = [
+    new RegExp(`<th\\b[^>]*>\\s*${label}\\s*:?\\s*</th>\\s*<td\\b[^>]*>([\\s\\S]*?)</td>`, 'i'),
+    new RegExp(`<td\\b[^>]*>\\s*${label}\\s*:?\\s*</td>\\s*<td\\b[^>]*>([\\s\\S]*?)</td>`, 'i'),
+    new RegExp(`<dt\\b[^>]*>\\s*${label}\\s*:?\\s*</dt>\\s*<dd\\b[^>]*>([\\s\\S]*?)</dd>`, 'i'),
+  ];
+  for (const re of patterns) {
+    const m = decoded.match(re);
+    if (m) {
+      const v = stripTags(m[1]);
+      if (v && !NG_PLACEHOLDER.test(v)) return v;
+    }
+  }
+  return null;
+}
+
+/**
+ * Value extraction for the `<div><span>LABEL</span>VALUE</div>` layout (Wandsworth
+ * "Application Progress Summary"/"Application Details" skin). VALUE is the text
+ * node(s) right after </span>, inside the same <div>. There is NO cheerio in this
+ * project (pure-regex adapter), so we match the label's <span> by regex.
+ *
+ * Generalized for ALL Northgate councils: label match is case-INSENSITIVE and allows
+ * an optional trailing colon, but is still anchored to the span's close tag so a
+ * short label ("Agent") can't match a longer one ("Agent Name"). Cleaning: &nbsp;
+ * (named + numeric) → space; take the FIRST non-empty line (Case Officer trails a
+ * phone; Decision trails a date); strip tags/entities and trim; empty/placeholder
+ * → null. (Literal U+00A0 is handled by stripTags/trim, which treat it as \s.)
+ *
+ * @param {string} html
+ * @param {string} label label text inside the <span> (matched case-insensitively)
+ * @returns {string|null}
+ */
+function northgateFieldValue(html, label) {
+  const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+');
+  const re = new RegExp(`<span\\b[^>]*>\\s*${escaped}\\s*:?\\s*</span>([\\s\\S]*?)</div>`, 'i');
+  const m = String(html || '').match(re);
+  if (!m) return null;
+  const firstLine = m[1]
+    .replace(/&nbsp;|&#0*160;|&#x0*a0;/gi, ' ') // named + numeric non-breaking space
+    .split('\n')
+    .map(s => s.trim())
+    .find(s => s.length > 0) || '';
+  const v = stripTags(firstLine); // strips any nested tags, decodes entities, trims
+  return v && !NG_PLACEHOLDER.test(v) ? v : null;
+}
+
+/**
+ * Resolve a field across ALL Northgate council skins: try each label synonym against
+ * the <div><span> layout, then fall back to the <th>/<td>, <td>/<td>, <dt>/<dd>
+ * layouts (ngLabeledValue). First non-empty wins. Both structure families and the
+ * synonym list make this council-agnostic rather than Wandsworth-only.
+ * @param {string} html
+ * @param {string[]} labels label synonyms, most-specific first
+ * @returns {string|null}
+ */
+function ngField(html, labels) {
+  for (const label of labels) {
+    const v = northgateFieldValue(html, label);
+    if (v) return v;
+  }
+  return ngLabeledValue(html, labels); // th/td | td/td | dt/dd (already tries all synonyms)
+}
+
+/**
+ * Parse contact/decision fields from a Northgate detail-page HTML body. Council-
+ * AGNOSTIC: each field is resolved via ngField() over a synonym list AND both the
+ * <div><span> and <th>/<td>/<dt> structure families, so it works beyond Wandsworth.
+ * Keys follow the adapter metadata convention consumed by index.js adapterContacts.
+ * A field simply stays null on councils/pages that don't expose it (e.g. Wandsworth's
+ * summary page has no agent address/company; target date lives on the Dates sub-page).
+ * @param {string} html
+ * @returns {{applicant_name, agent_name, agent_company, agent_address, case_officer, decision, target_decision_date, consultation_start_date}}
+ */
+function parseNorthgateContactFields(html) {
+  return {
+    applicant_name: ngField(html, ['Applicant Name', 'Applicant', 'Applicant(s)']),
+    agent_name: ngField(html, ['Agent Name', "Agent's Name", 'Agent']),
+    agent_company: ngField(html, ['Agent Company', "Agent's Company"]),
+    agent_address: ngField(html, ["Agent's Address", 'Agent Address']),
+    case_officer: ngField(html, ['Case Officer / Tel', 'Case Officer Name', 'Case Officer', 'Officer']),
+    decision: ngField(html, ['Decision', 'Decision Type', 'Decision Made']),
+    target_decision_date: ngField(html, ['Target Decision Date', 'Target Determination Date', 'Determination Deadline', 'Statutory Expiry Date']),
+    // Only genuine consultation-start labels; deliberately NOT "Comments Until"
+    // (a close date with different semantics) — so Wandsworth stays null.
+    consultation_start_date: ngField(html, ['Consultation Start Date', 'Consultation Period Begins', 'Neighbour Consultation Start', 'Site Notice Date']),
+  };
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 /**
  * @param {object} application Planit app object (title → ref).
@@ -301,6 +406,7 @@ async function scrapeCapitaDocuments(application, navUrl) {
     metadata: {
       address: null, case_no: null, status: null, dev_description: null,
       applicant_name: null, agent_name: null, case_officer: null,
+      decision: null, target_decision_date: null,
     },
     downloadAuth: undefined, // public stateless files
     scrapeStatusHint: null,
@@ -321,6 +427,9 @@ async function scrapeCapitaDocuments(application, navUrl) {
   // ── Step 0: resolve the comments URL ────────────────────────────────────────
   let commentsUrl;
   let ref;
+  // Northgate detail-page HTML, captured when navUrl already is that page (else
+  // fetched later for contact fields). Reused so we never fetch the detail page twice.
+  let detailHtml = null;
   try {
     if (/planningcase\/comments\.aspx/i.test(navUrl)) {
       commentsUrl = navUrl;
@@ -330,6 +439,7 @@ async function scrapeCapitaDocuments(application, navUrl) {
       const detail = await httpGet(navUrl, jar);
       const bot0 = detectAntiBot(detail.body);
       if (bot0) { console.log(`[capita] ${council}: anti-bot marker '${bot0}' on detail page — skipping`); return finish('blocked_anti_bot'); }
+      detailHtml = detail.body; // reuse for contact-field extraction below
       const m = detail.body.match(/href="([^"]*planningcase\/comments\.aspx\?case=[^"]*)"/i);
       if (!m) {
         console.log(`[capita] ${council} ${refFromTitle || '?'}: no Capita comments link on detail page — requires_different_path (flag for adapter)`);
@@ -447,6 +557,64 @@ async function scrapeCapitaDocuments(application, navUrl) {
     result.scrapeStatusHint = 'no_documents';
   }
 
+  // ── Step 4: contact/decision fields from the Northgate detail page ───────────
+  // The comments page lacks these; the detail page (different host) has them. Reuse
+  // detailHtml when navUrl WAS the detail page (set in Step 0 via httpGet on that same
+  // host — left unchanged). Otherwise fetch the app's source_url with PLAYWRIGHT, not
+  // httpGet: our cookie jar holds cookies for the comments HOST (planning2.{council}),
+  // which are useless for the session-bound detail page on a DIFFERENT host
+  // (planning.{council}) — a cold jar GET returned non-200, so detailHtml stayed null
+  // and parsing was silently skipped. Playwright navigates the detail host directly
+  // with correct per-host cookies. Capita is otherwise no-Playwright, so we lazily
+  // spin up a hardened context here (via src/browser.js) and ALWAYS tear it down.
+  // Best-effort: any failure just leaves the fields null (never fails the scrape).
+  try {
+    if (!detailHtml) {
+      const detailUrl = (application && (application.sourceUrl || application.source_url)) || null;
+      if (detailUrl && !detailUrl.toLowerCase().includes('/planningcase/')) {
+        console.log(`[capita] ${council} ${ref || '?'}: fetching Northgate detail page via Playwright: ${detailUrl}`);
+        let detailContext = null;
+        let detailPage = null;
+        try {
+          const { createBrowserContext } = require('../browser');
+          detailContext = await createBrowserContext({ headless: true, sessionId: 'capita_detail' });
+          detailPage = await detailContext.newPage();
+          const response = await detailPage.goto(detailUrl, { waitUntil: 'domcontentloaded', timeout: DEFAULT_TIMEOUT_MS });
+          const status = response ? response.status() : null;
+          if (status !== null && status < 400) {
+            const body = await detailPage.content();
+            if (detectAntiBot(body)) {
+              console.warn(`[capita] ${council} ${ref || '?'}: detail page anti-bot marker detected — discarding`);
+            } else {
+              detailHtml = body;
+              console.log(`[capita] ${council} ${ref || '?'}: detail page retrieved (HTTP ${status}, ${body.length}b)`);
+            }
+          } else {
+            console.warn(`[capita] ${council} ${ref || '?'}: detail page fetch failed: HTTP ${status === null ? 'no response' : status}`);
+          }
+        } catch (err) {
+          console.warn(`[capita] ${council} ${ref || '?'}: detail page navigation error: ${String(err && err.message).split('\n')[0]}`);
+        } finally {
+          if (detailPage) await detailPage.close().catch(() => {});
+          if (detailContext) await detailContext.close().catch(() => {});
+        }
+      }
+    }
+
+    if (detailHtml) {
+      const contacts = parseNorthgateContactFields(detailHtml);
+      for (const [k, v] of Object.entries(contacts)) {
+        if (v) result.metadata[k] = v;
+      }
+      const found = Object.entries(contacts).filter(([, v]) => v).map(([k]) => k);
+      console.log(`[capita] ${council} ${ref || '?'}: contact fields: ${found.length ? found.join(', ') : 'none'}`);
+    } else {
+      console.log(`[capita] ${council} ${ref || '?'}: no detail HTML available — contact fields skipped`);
+    }
+  } catch (err) {
+    console.log(`[capita] ${council} ${ref || '?'}: contact-field extraction skipped: ${String(err && err.message).split('\n')[0]}`);
+  }
+
   console.log(`[capita] ${council} ${ref || '?'}: docs=${result.documents.length}/${totalExpected} categories=${postbackCats.length} partial=${result.metrics.partial} strategy=${DOC_URL_STRATEGY}`);
   return finish();
 }
@@ -465,4 +633,6 @@ module.exports = {
   hiddenField,
   labelText,
   buildDocUrl,
+  parseNorthgateContactFields, // Northgate detail-page contact/decision fields
+  ngLabeledValue,
 };

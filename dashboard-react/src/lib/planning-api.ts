@@ -1,4 +1,4 @@
-import { ApplicationRecord, ChangeLogEntry } from "./types";
+import { ApplicationRecord, ChangeLogEntry, ScrapeRun, ScrapeEvent, ScrapeRunStatus } from "./types";
 import { getSupabaseClient } from "./supabase";
 
 // Ported from the old dashboard's `src/lib/supabase-api.ts`.
@@ -291,4 +291,87 @@ export async function getChangeFeed(options: { page?: string | number; pageSize?
     changes: { [row.change_type]: [row.new_value || row.old_value] },
   })) as ChangeLogEntry[];
   return { data: entries, count: count || 0, page, pageSize, source: "supabase" };
+}
+
+// ── Scraper run logging (migration 011) ───────────────────────────────────────
+
+export async function fetchRuns(options: {
+  limit?: number;
+  offset?: number;
+  status?: ScrapeRunStatus | null;
+  since?: string | null;
+} = {}): Promise<{ data: ScrapeRun[]; count: number }> {
+  const client = requireClient();
+  const limit = options.limit ?? 25;
+  const offset = options.offset ?? 0;
+  let query = client
+    .from("scrape_runs")
+    .select("*", { count: "exact" })
+    .order("started_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+  if (options.status) query = query.eq("status", options.status);
+  if (options.since) query = query.gte("started_at", options.since);
+  const { data, count, error } = await query;
+  if (error) throw new Error(`[planning-api] runs query failed: ${error.message}`);
+  return { data: (data || []) as ScrapeRun[], count: count || 0 };
+}
+
+export async function fetchRun(id: string): Promise<ScrapeRun | null> {
+  const client = requireClient();
+  const { data, error } = await client.from("scrape_runs").select("*").eq("id", id).maybeSingle();
+  if (error) throw new Error(`[planning-api] run detail query failed: ${error.message}`);
+  return (data as ScrapeRun) || null;
+}
+
+export async function fetchRunEvents(
+  runId: string,
+  filters: { level?: string | null; stage?: string | null; council?: string | null; search?: string | null } = {}
+): Promise<ScrapeEvent[]> {
+  const client = requireClient();
+  let query = client
+    .from("scrape_events")
+    .select("*")
+    .eq("run_id", runId)
+    .order("ts", { ascending: true })
+    .limit(5000); // safety cap (matches spec)
+  if (filters.level) query = query.eq("level", filters.level);
+  if (filters.stage) query = query.eq("stage", filters.stage);
+  if (filters.council) query = query.eq("council", filters.council);
+  if (filters.search) query = query.ilike("message", `%${filters.search}%`);
+  const { data, error } = await query;
+  if (error) throw new Error(`[planning-api] run events query failed: ${error.message}`);
+  return (data || []) as ScrapeEvent[];
+}
+
+export interface RunHealthToday {
+  total: number;
+  completed: number;
+  failed: number;
+  running: number;
+  partial: number;
+  aborted: number;
+  avgDurationMs: number | null;
+}
+
+export async function fetchRunHealthToday(): Promise<RunHealthToday> {
+  const client = requireClient();
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data, error } = await client
+    .from("scrape_runs")
+    .select("status, started_at, finished_at")
+    .gte("started_at", since);
+  if (error) throw new Error(`[planning-api] run health query failed: ${error.message}`);
+  const rows = (data || []) as Array<Pick<ScrapeRun, "status" | "started_at" | "finished_at">>;
+  const health: RunHealthToday = { total: rows.length, completed: 0, failed: 0, running: 0, partial: 0, aborted: 0, avgDurationMs: null };
+  let durSum = 0;
+  let durCount = 0;
+  for (const r of rows) {
+    if (r.status in health) (health as Record<string, number>)[r.status] += 1;
+    if (r.finished_at) {
+      durSum += new Date(r.finished_at).getTime() - new Date(r.started_at).getTime();
+      durCount += 1;
+    }
+  }
+  health.avgDurationMs = durCount > 0 ? Math.round(durSum / durCount) : null;
+  return health;
 }

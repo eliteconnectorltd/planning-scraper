@@ -3,6 +3,18 @@
 const { executeWithRetry, getClientOrNull, normalizePage } = require('./baseRepository');
 const { isTerminalStatus } = require('../../utils/terminalStatus');
 
+// Adapter/portal-sourced contact & decision columns. Emitted CONDITIONALLY by
+// mapApplication (only when `app` carries a non-empty value) so the many thin,
+// status-only single upserts never null a value a prior scrape found. Because they
+// make the emitted key set per-row-variable, they are STRIPPED from the batch
+// upsert path (see upsertApplications) — PostgREST bulk upsert needs a uniform
+// column set across rows, and every app also gets a conditional single upsert in
+// the same run, so nothing is lost.
+const CONDITIONAL_CONTACT_KEYS = [
+  'applicant', 'agent', 'case_officer', 'decision',
+  'agent_company', 'agent_address', 'target_decision_date', 'consultation_start_date',
+];
+
 /**
  * Maps an application object to a DB row.
  *
@@ -14,6 +26,9 @@ const { isTerminalStatus } = require('../../utils/terminalStatus');
  *      sites that actually attempted document extraction set this).
  *   @param {boolean} [opts.documentsChanged] include documents_last_changed_at=now().
  *   @param {number}  [opts.recheckCount]     include recheck_count=<n>.
+ *   @param {boolean} [opts.setTerminalFromStatus] derive is_terminal from app.status
+ *      (only the post-scrape / terminal-skip flows set this; the batch upsert must
+ *      not, or it would clobber the durable is_terminal flag — see below).
  *   @param {Date}    [opts.now]              injectable clock for tests.
  */
 function mapApplication(app = {}, opts = {}) {
@@ -24,15 +39,11 @@ function mapApplication(app = {}, opts = {}) {
     address: app.address || null,
     proposal: app.proposal || app.description || null,
     status: app.status || null,
-    applicant: app.applicant || null,
-    agent: app.agent || null,
-    case_officer: app.case_officer || null, // migration 005
     application_type: app.application_type || app.applicationType || null,
     source_url: app.source_url || app.sourceUrl || null,
     documents_url: app.documents_url || app.docsUrl || null,
     validated_at: app.validated_at || null,
     received_at: app.received_at || app.startDate || null,
-    decision: app.decision || null,
     decision_date: app.decision_date || app.decisionDate || null,
     // Extended Planit metadata columns (migration 004). Numeric columns use ??
     // so a legitimate 0 (e.g. n_comments) is preserved, not coerced to null.
@@ -49,10 +60,6 @@ function mapApplication(app = {}, opts = {}) {
     n_documents: app.n_documents ?? app.nDocuments ?? null,
     n_constraints: app.n_constraints ?? null,
     n_comments: app.n_comments ?? null,
-    agent_company: app.agent_company || null,
-    agent_address: app.agent_address || null,
-    target_decision_date: app.target_decision_date || null,
-    consultation_start_date: app.consultation_start_date || null,
     comment_url: app.comment_url || null,
     map_url: app.map_url || null,
     scrape_status: app.scrape_status || app.scrapeStatus || null,
@@ -70,21 +77,35 @@ function mapApplication(app = {}, opts = {}) {
   // "last touched". Not stamped on filter/queued/missing_url/generic_disabled.
   if (opts.lastChecked === true) row.last_checked_at = now;
 
-  // is_terminal: emit a concrete boolean ONLY when the status is KNOWN.
-  //   - status set + terminal     → true
-  //   - status set + not terminal → false (explicit, so known-active rows are
-  //                                 false, not null — fixes pre-migration/thin-
-  //                                 upsert nulls going forward)
-  //   - status absent             → OMIT (preserve existing DB value; a thin
-  //                                 upsert that doesn't carry status must never
-  //                                 flip a previously-terminal app back to active)
-  if (app.status) row.is_terminal = isTerminalStatus(app.status);
+  // is_terminal: a DURABLE "we have scraped this and it's decided" signal — NOT a
+  // derivative of Planit status. Emit it ONLY when the caller EXPLICITLY signals
+  // it's safe to derive from status (opts.setTerminalFromStatus === true), i.e.
+  // from the post-scrape and terminal-skip flows that have actually done the work.
+  // The pre-loop batch upsert passes no opts, so it must NOT touch is_terminal —
+  // otherwise it re-flips a decided app to terminal from Planit status every run,
+  // clobbering the durable value and undoing migration-009/010 resets (Pattern C bug).
+  //   - signalled + status terminal     → true
+  //   - signalled + status not terminal → false (explicit; known-active = false)
+  //   - not signalled, or status absent → OMIT (preserve existing DB value)
+  if (opts.setTerminalFromStatus === true && app.status) {
+    row.is_terminal = isTerminalStatus(app.status);
+  }
 
   // documents_last_changed_at: ONLY when the orchestrator detected a change.
   if (opts.documentsChanged === true) row.documents_last_changed_at = now;
 
   // recheck_count: ONLY when the caller computed it (read-before-write).
   if (typeof opts.recheckCount === 'number') row.recheck_count = opts.recheckCount;
+
+  // ── Adapter/portal-sourced contact & decision fields — CONDITIONALLY included ─
+  // See CONDITIONAL_CONTACT_KEYS. Added ONLY when `app` carries a non-empty value,
+  // so a thin/status-only upsert (queued, skipped_terminal, missing_url,
+  // generic_disabled) that carries Planit metadata only never clobbers a value a
+  // prior portal scrape found. Planit-supplied values still flow here because
+  // applyPlanitMetadata sets them on `app` first (e.g. agent_company/target date).
+  for (const key of CONDITIONAL_CONTACT_KEYS) {
+    if (app[key]) row[key] = app[key];
+  }
 
   return row;
 }
@@ -123,7 +144,15 @@ async function upsertApplication(app, opts = {}) {
  */
 async function upsertApplications(apps = []) {
   const client = getClientOrNull();
-  const rows = apps.map(mapApplication).filter(r => r.application_uid);
+  // Strip the conditionally-emitted contact/decision keys so every row in the batch
+  // has a uniform column set (PostgREST bulk upsert requires it; heterogeneous keys
+  // otherwise error or null-fill-clobber on conflict). These are written per-app by
+  // the conditional single upsert that follows in the same run — nothing is lost.
+  const rows = apps.map(app => {
+    const row = mapApplication(app);
+    for (const key of CONDITIONAL_CONTACT_KEYS) delete row[key];
+    return row;
+  }).filter(r => r.application_uid);
   if (!client || rows.length === 0) return [];
 
   return executeWithRetry(async () => client

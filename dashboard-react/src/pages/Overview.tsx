@@ -22,7 +22,7 @@ export default function Overview() {
 
   if (isError) {
     return (
-      <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-4 px-6 py-6">
+      <div className="page-container">
         <div className="card-surface p-5 text-sm text-muted-foreground">
           <div className="mb-1 font-semibold text-foreground">Couldn&apos;t load overview data</div>
           <p>{error instanceof Error ? error.message : "Unknown error"}</p>
@@ -57,25 +57,25 @@ export default function Overview() {
     .slice(0, 8);
 
   return (
-    <div className="mx-auto flex w-full max-w-[1200px] flex-col gap-6 px-6 py-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
+    <div className="page-container gap-6">
+      <header className="page-header">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight text-foreground">Overview</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
+          <h1 className="page-title">Overview</h1>
+          <p className="page-description">
             Planning applications, documents, and change signals across tracked councils.
           </p>
         </div>
-        <Link to="/applications" className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:border-border-strong">
+        <Link to="/applications" className="inline-flex h-10 items-center justify-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium text-foreground transition-colors hover:border-border-strong hover:bg-secondary sm:h-9">
           View applications
           <ArrowUpRight className="h-4 w-4 text-muted-foreground" />
         </Link>
       </header>
 
-      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         {kpis.map(kpi => (
           <div key={kpi.label} className="card-surface p-4">
             <div className="text-2xl font-semibold tabular-nums text-foreground">{formatNumber(kpi.value)}</div>
-            <div className="mt-1 text-sm text-muted-foreground">{kpi.label}</div>
+            <div className="page-description">{kpi.label}</div>
           </div>
         ))}
       </section>
@@ -92,7 +92,7 @@ export default function Overview() {
               ["Documents indexed", newDocs || totalDocuments, "Stored in Supabase and linked to records"],
               ["Timeline events", timelineEvents, "Council dates and document additions"],
             ].map(([title, value, description]) => (
-              <div key={title as string} className="flex items-center justify-between gap-4 px-4 py-3">
+              <div key={title as string} className="flex items-start justify-between gap-4 px-4 py-3">
                 <div>
                   <div className="text-sm font-medium text-foreground">{title}</div>
                   <div className="mt-0.5 text-xs text-muted-foreground">{description}</div>

@@ -334,6 +334,111 @@ function normalizeDocument(rawDoc, baseUrl) {
   };
 }
 
+// ── Contact / decision metadata (Details, Summary and Dates tabs) ─────────────
+// Idox splits application metadata across tabs: applicant/agent/case officer live
+// on the "Details" tab; decision + dates on "Summary"; consultation/target dates
+// on "Dates". The document scraper only visits the Documents tab, so these fields
+// were never captured (applicant/agent/case_officer/decision were 0/81 in dev).
+//
+// Extraction is pure-regex over the tab HTML. Idox renders label/value pairs in
+// three shapes across skins: <th>Label</th><td>Value</td>, <td>Label</td><td>Value</td>,
+// and <dt>Label</dt><dd>Value</dd>. The label is anchored to its CLOSING tag (after
+// an optional colon) so "Agent" cannot match an "Agent Name"/"Agent's Address" cell.
+// CAVEAT: labels vary by council skin; verified label set below is a best-effort
+// union — re-check when onboarding a new Idox council (no per-council code here).
+
+const IDOX_PLACEHOLDER = /^(?:-+|—|n\/?a|not\s+available|not\s+yet\s+available|none|tbc|unknown)$/i;
+
+/** Strip tags/entities, collapse whitespace; return null for empty/placeholder text. */
+function cleanFieldValue(raw) {
+  if (raw == null) return null;
+  const text = String(raw)
+    .replace(/<[^>]*>/g, ' ')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&quot;/gi, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text || IDOX_PLACEHOLDER.test(text)) return null;
+  return text;
+}
+
+/**
+ * First labelled value in `html` matching any of `labels` (case-insensitive),
+ * trying th/td, td/td and dt/dd cell pairs. Returns cleaned string or null.
+ */
+function labeledValue(html, labels) {
+  // Decode the entities that appear inside LABELS (apostrophe, ampersand, nbsp) so a
+  // label like "Agent's Address" matches markup rendered as "Agent&#39;s Address".
+  const decoded = String(html || '')
+    .replace(/&#0*39;|&apos;/gi, "'")
+    .replace(/&amp;/gi, '&')
+    .replace(/&nbsp;/gi, ' ');
+  const alt = labels.map(l => l.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')).join('|');
+  const label = `(?:${alt})`;
+  const patterns = [
+    new RegExp(`<th\\b[^>]*>\\s*${label}\\s*:?\\s*</th>\\s*<td\\b[^>]*>([\\s\\S]*?)</td>`, 'i'),
+    new RegExp(`<td\\b[^>]*>\\s*${label}\\s*:?\\s*</td>\\s*<td\\b[^>]*>([\\s\\S]*?)</td>`, 'i'),
+    new RegExp(`<dt\\b[^>]*>\\s*${label}\\s*:?\\s*</dt>\\s*<dd\\b[^>]*>([\\s\\S]*?)</dd>`, 'i'),
+  ];
+  for (const re of patterns) {
+    const m = decoded.match(re);
+    if (m) {
+      const val = cleanFieldValue(m[1]);
+      if (val) return val;
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse Idox contact/decision fields from concatenated tab HTML.
+ * Keys follow the adapter metadata convention consumed by index.js adapterContacts.
+ * @param {string} html
+ * @returns {{applicant_name, agent_name, agent_company, agent_address, case_officer, decision, target_decision_date, consultation_start_date}}
+ */
+function parseIdoxContactFields(html) {
+  const h = String(html || '');
+  return {
+    applicant_name: labeledValue(h, ['Applicant Name', 'Applicant']),
+    agent_name: labeledValue(h, ['Agent Name', 'Agent']),
+    agent_company: labeledValue(h, ["Agent Company", "Agent's Company", 'Company Name']),
+    agent_address: labeledValue(h, ["Agent's Address", 'Agent Address']),
+    case_officer: labeledValue(h, ['Case Officer Name', 'Case Officer']),
+    decision: labeledValue(h, ['Decision', 'Decision Made']),
+    target_decision_date: labeledValue(h, ['Target Decision Date', 'Determination Deadline', 'Target Date', 'Expiry Date']),
+    consultation_start_date: labeledValue(h, ['Consultation Start Date', 'Consultation Period Begins', 'Neighbour Consultation Start']),
+  };
+}
+
+/** Rewrite an application URL to a specific Idox activeTab. */
+function idoxTabUrl(url, tab) {
+  const joiner = url.includes('?') ? '&' : '?';
+  return /activeTab=/i.test(url)
+    ? url.replace(/activeTab=[^&]+/i, `activeTab=${tab}`)
+    : `${url}${joiner}activeTab=${tab}`;
+}
+
+/**
+ * Best-effort: visit the metadata tabs and return concatenated HTML for parsing.
+ * Runs AFTER document extraction (navigates the page away from Documents). Never
+ * throws — any tab that fails is simply skipped; contact fields are supplementary.
+ */
+async function collectIdoxContactHtml(page, url) {
+  let html = '';
+  for (const tab of ['summary', 'details', 'dates']) {
+    try {
+      await page.goto(idoxTabUrl(url, tab), { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(500);
+      html += '\n' + (await page.content());
+    } catch (err) {
+      console.log(`[idox] [contacts] Tab "${tab}" fetch skipped: ${err.message}`);
+    }
+  }
+  return html;
+}
+
 /**
  * Captures screenshots, DOM snapshots, and HTML code on extraction failures.
  *
@@ -400,10 +505,14 @@ async function scrapeIdoxDocuments(page, url) {
 
   try {
     // 1. Open the documents tab with adaptive timeouts
+    console.log(`[idox] [step 1/3] Opening documents tab (navigation + challenge check): ${url}`);
     success = await openDocumentsTab(page, url, override);
+    console.log(`[idox] [step 1/3] Documents tab opened (success=${success})`);
     if (success) {
       // 2. Resilient row extraction
+      console.log('[idox] [step 2/3] Extracting document rows from table');
       rawData = await extractDocumentRows(page, override);
+      console.log(`[idox] [step 2/3] Row extraction returned ${rawData.rows.length} raw row(s) (source=${rawData.source})`);
     }
   } catch (err) {
     errorMsg = err.message;
@@ -471,9 +580,24 @@ async function scrapeIdoxDocuments(page, url) {
     await saveDebugAssets(page, domainSegment);
   }
 
+  // Contact/decision metadata from the Details/Summary/Dates tabs (best-effort;
+  // supplementary to documents — never fails the scrape). Done LAST because it
+  // navigates the page away from the Documents tab.
+  let metadata = null;
+  try {
+    console.log('[idox] [step 3/3] Collecting contact metadata (summary/details/dates tabs)');
+    const contactHtml = await collectIdoxContactHtml(page, url);
+    metadata = parseIdoxContactFields(contactHtml);
+    const found = Object.entries(metadata).filter(([, v]) => v).map(([k]) => k);
+    console.log(`[idox] Contact fields extracted: ${found.length ? found.join(', ') : 'none'}`);
+  } catch (err) {
+    console.log(`[idox] Contact field extraction skipped: ${err.message}`);
+  }
+
   return {
     documents: validDocs,
-    metrics
+    metrics,
+    metadata: metadata || undefined,
   };
 }
 
@@ -483,5 +607,10 @@ module.exports = {
   extractDocumentRows,
   normalizeDocument,
   scrapeIdoxDocuments,
-  saveDebugAssets
+  saveDebugAssets,
+  // exported for unit tests:
+  parseIdoxContactFields,
+  labeledValue,
+  cleanFieldValue,
+  idoxTabUrl,
 };

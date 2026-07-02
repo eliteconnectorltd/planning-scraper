@@ -7,7 +7,7 @@ type SourceActionsProps = {
   documentsUrl?: string;
 };
 
-const btn = "inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-3 py-1.5 text-sm font-medium text-foreground transition-colors hover:border-border-strong hover:bg-secondary";
+const btn = "inline-flex h-10 items-center justify-center gap-1.5 rounded-md border border-border bg-card px-3 text-sm font-medium text-foreground transition-colors hover:border-border-strong hover:bg-secondary sm:h-9 sm:justify-start";
 
 export function SourceActions({ sourceUrl, planitUrl, documentsUrl }: SourceActionsProps) {
   const [copied, setCopied] = useState<string | null>(null);
@@ -25,7 +25,7 @@ export function SourceActions({ sourceUrl, planitUrl, documentsUrl }: SourceActi
   }
 
   return (
-    <div className="flex flex-wrap gap-2">
+    <div className="grid w-full grid-cols-1 gap-2 sm:w-auto sm:grid-cols-2 xl:flex xl:flex-wrap xl:justify-end">
       {sourceUrl && (
         <>
           <button type="button" onClick={() => openUrl(sourceUrl)} className={btn}>

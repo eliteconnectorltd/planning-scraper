@@ -60,6 +60,48 @@ function documentDownloadUrl(hash) {
 }
 
 /**
+ * Map contact/decision fields from the Arcus application metadata payload
+ * (GET /api/application/{id} — documented in the header comment, previously unused).
+ *
+ * Key names VERIFIED against a live Islington payload (flat object, no nesting):
+ * applicant/agent names split into Forename/Surname (+ an oft-null Name field);
+ * officerName, decisionText, statutoryExpiryDate. agent_company/agent_address are
+ * not returned by this endpoint (kept null). Absent fields stay null — adapterContacts
+ * skips nulls, so nothing is clobbered.
+ */
+function mapArcusMetadata(meta) {
+  if (!meta || typeof meta !== 'object') return null;
+
+  // Compose a full name from forename + surname when both meaningful.
+  // Arcus often puts the whole entity name in the surname field
+  // (organizations, "C/O Agent" placeholders, etc.), so surname alone
+  // is usually the right answer.
+  const composeName = (forename, surname, nameField) => {
+    // Prefer explicit name field if populated
+    if (nameField && String(nameField).trim()) return String(nameField).trim();
+    const f = (forename || '').trim();
+    const s = (surname || '').trim();
+    if (!f && !s) return null;
+    // Avoid duplication: if surname already contains forename, use surname alone
+    if (f && s && !s.toLowerCase().startsWith(f.toLowerCase())) return `${f} ${s}`;
+    return s || f;
+  };
+
+  return {
+    applicant_name: composeName(meta.applicantForename, meta.applicantSurname, meta.applicantName),
+    agent_name: composeName(meta.agentForename, meta.agentSurname, meta.agentName),
+    agent_company: null,  // Arcus does not separate agent company from name
+    agent_address: null,  // Not returned by this endpoint
+    case_officer: meta.officerName || null,
+    decision: meta.decisionText || null,
+    target_decision_date: meta.statutoryExpiryDate || null,
+    consultation_start_date: meta.pressNoticeStartDate
+      || meta.siteNoticeDate
+      || null,
+  };
+}
+
+/**
  * Main adapter. Signature matches scrapeIdoxDocuments(page, url).
  * Uses page.context().request for HTTP so it shares the hardened browser session.
  */
@@ -110,6 +152,22 @@ async function scrapeArcusDocuments(page, url) {
       confidence: 'HIGH', // direct token download
     }));
 
+  // Application metadata (contact/decision fields). Documented endpoint, separate
+  // from the document list. Best-effort — a failure here never fails the scrape.
+  let metadata = null;
+  try {
+    const mres = await request.get(`${API_BASE}/api/application/${ctx.id}`, { headers, timeout: 30000 });
+    if (mres.ok()) {
+      metadata = mapArcusMetadata(await mres.json());
+      const found = metadata ? Object.entries(metadata).filter(([, v]) => v).map(([k]) => k) : [];
+      console.log(`[arcus] ${ctx.council} app ${ctx.id}: metadata fields: ${found.length ? found.join(', ') : 'none (verify key names against a live payload)'}`);
+    } else {
+      console.log(`[arcus] ${ctx.council} app ${ctx.id}: metadata HTTP ${mres.status()} — contact fields skipped`);
+    }
+  } catch (err) {
+    console.log(`[arcus] ${ctx.council} app ${ctx.id}: metadata fetch error: ${err.message}`);
+  }
+
   metrics.totalRows = list.length;
   metrics.validDocs = documents.length;
   metrics.runtimeMs = Date.now() - startTime;
@@ -122,6 +180,7 @@ async function scrapeArcusDocuments(page, url) {
   return {
     documents,
     metrics,
+    metadata: metadata || undefined,
     downloadAuth: { headers: arcusHeaders(ctx.council) },
   };
 }
@@ -131,4 +190,5 @@ module.exports = {
   parseArcusUrl,
   clientCode,
   CLIENT_CODES,
+  mapArcusMetadata,
 };
